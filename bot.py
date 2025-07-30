@@ -28,7 +28,9 @@ async def start_cmd(_, message: Message):
 # HELP
 @app.on_message(filters.command("help1"))
 async def help_cmd(_, message: Message):
-    help_text = "/setcaption - Custom caption\n/addgroup - add the bot in group and send /addgroup in that group"
+    help_text = ("/setcaption - Custom caption\n"
+                 "/showcaption - Show current caption\n"
+                 "/addgroup - Add the bot in group and send /addgroup in that group")
     await message.reply_text(help_text)
 
 # SET CUSTOM CAPTION
@@ -40,6 +42,12 @@ async def set_caption(_, message: Message):
     custom_caption = message.text.split(" ", 1)[1]
     group_captions[message.chat.id] = custom_caption
     await message.reply_text("✅ Custom caption set successfully (will reset on restart)!")
+
+# SHOW CURRENT CAPTION
+@app.on_message(filters.command("showcaption") & filters.group)
+async def show_caption(_, message: Message):
+    current_caption = group_captions.get(message.chat.id, default_caption)
+    await message.reply_text(f"**Current Caption Template:**\n\n{current_caption}")
 
 # AUTO CAPTION
 @app.on_message(filters.group & (filters.video | filters.document))
