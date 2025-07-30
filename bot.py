@@ -2,12 +2,12 @@ from pyrogram import Client, filters
 from pyrogram.types import Message
 import re
 
-# BOT CONFIG
-API_ID = 22768311
-API_HASH = "702d8884f48b42e865425391432b3794"
-BOT_TOKEN = ""
+# ================== BOT CONFIG ==================
+API_ID = 22768311            # Replace with your API ID
+API_HASH = "702d8884f48b42e865425391432b3794" # Replace with your API HASH
+BOT_TOKEN = ""  # Replace with your BOT TOKEN
 
-# Default Caption Template
+# ================== DEFAULT CAPTION ==================
 default_caption = """<b>➥ {AnimeName} [{Sn}]
 🎬 Episode - {Ep}
 🎧 Language - Hindi #Official
@@ -15,25 +15,31 @@ default_caption = """<b>➥ {AnimeName} [{Sn}]
 📡 Powered by :
 @CrunchyRollChannel.</b>"""
 
-# In-Memory Storage for Custom Captions (per channel)
+# In-memory storage for captions (resets on restart)
 channel_captions = {}
 
+# ================== BOT APP ==================
 app = Client("AutoCaptionBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# START COMMAND (only works in private)
+
+# ================== COMMANDS ==================
+
+# /start (private)
 @app.on_message(filters.command("start") & filters.private)
 async def start_cmd(_, message: Message):
     await message.reply_text("I am a private bot of @World_Fastest_Bots")
 
-# HELP COMMAND (only works in private)
+
+# /help1 (private)
 @app.on_message(filters.command("help1") & filters.private)
 async def help_cmd(_, message: Message):
     help_text = ("/setcaption - Set custom caption (Use in channel)\n"
                  "/showcaption - Show current caption\n"
-                 "➜ Add me as admin in your channel with 'Post Messages' permission.")
+                 "➜ Add me as admin in your channel with 'Post Messages' & 'Delete Messages' permission.")
     await message.reply_text(help_text)
 
-# SET CUSTOM CAPTION (only works when sent by channel creator/admin)
+
+# /setcaption (channel)
 @app.on_message(filters.command("setcaption") & filters.channel)
 async def set_caption(_, message: Message):
     if len(message.command) < 2:
@@ -43,36 +49,54 @@ async def set_caption(_, message: Message):
     channel_captions[message.chat.id] = custom_caption
     await message.reply_text("✅ Custom caption set successfully (will reset on restart)!")
 
-# SHOW CURRENT CAPTION
+
+# /showcaption (channel)
 @app.on_message(filters.command("showcaption") & filters.channel)
 async def show_caption(_, message: Message):
     current_caption = channel_captions.get(message.chat.id, default_caption)
     await message.reply_text(f"**Current Caption Template:**\n\n{current_caption}")
 
-# AUTO CAPTION (works only in channels)
+
+# ================== AUTO CAPTION HANDLER ==================
 @app.on_message(filters.channel & (filters.video | filters.document))
 async def auto_caption(_, message: Message):
     file_name = message.document.file_name if message.document else message.video.file_name
 
-    # Extract details using regex
-    match = re.search(r"(?:\[.*?\]\s*)?(.+?)\s(S\d+)(E\d+).*?(\d{3,4}p)", file_name, re.IGNORECASE)
+    # 1️⃣ Remove starting tags like [@ChannelName]
+    clean_name = re.sub(r'^\[.*?\]\s*', '', file_name)
+
+    # 2️⃣ Improved regex for extracting details
+    match = re.search(
+        r"(.+?)\s*(S\d+)?(E\d+)?\s*.*?(\d{3,4}p|x265|x264)?",
+        clean_name,
+        re.IGNORECASE
+    )
+
     if not match:
         return
 
     AnimeName, Sn, Ep, Quality = match.groups()
-    Ep = Ep.replace("E", "")
 
-    # Get custom caption or default
+    # Defaults if missing
+    AnimeName = AnimeName.strip()
+    Sn = Sn.upper() if Sn else "S01"
+    Ep = Ep.replace("E", "") if Ep else "01"
+    Quality = Quality if Quality else "Unknown"
+
+    # Replace 360p → 480p
+    Quality = Quality.replace("360p", "480p")
+
+    # Select custom caption if set
     caption_template = channel_captions.get(message.chat.id, default_caption)
 
     caption_text = caption_template.format(
-        AnimeName=AnimeName.strip(),
-        Sn=Sn.upper(),
+        AnimeName=AnimeName,
+        Sn=Sn,
         Ep=Ep,
         Quality=Quality
     )
 
-    # Repost the file with the caption (and delete original)
+    # Repost with caption and delete original
     try:
         if message.document:
             await app.send_document(
@@ -87,8 +111,10 @@ async def auto_caption(_, message: Message):
                 caption=caption_text
             )
 
-        await message.delete()  # Delete the original message
+        await message.delete()
     except Exception as e:
         await message.reply_text(f"❌ Error sending file: {e}")
 
+
+# ================== RUN BOT ==================
 app.run()
