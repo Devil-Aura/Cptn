@@ -1,139 +1,122 @@
-import os
 import re
 import logging
+from difflib import SequenceMatcher
 from pyrogram import Client, filters
 from pyrogram.types import Message
-from pyrogram.errors import RPCError
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-API_ID = 22768311  # Replace with your API ID
-API_HASH = "702d8884f48b42e865425391432b3794"  # Replace with your API HASH
-BOT_TOKEN = ""  # Replace with your bot token
-LOG_CHANNEL = -1002746159355  # Your anime names log channel ID
+# CONFIG
+API_ID = 22768311  # Replace with your actual API ID
+API_HASH = "702d8884f48b42e865425391432b3794"  # Replace with your actual API HASH
+BOT_TOKEN = ""  # Replace with your actual BOT TOKEN
 
-app = Client("AutoCaptionBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
-
-anime_names = []
-
-# Command to fetch anime names from the log channel
-@app.on_message(filters.command("refreshanimes"))
-async def refresh_animes(_, message: Message):
-    global anime_names
-    anime_names = []
-    try:
-        async for msg in app.get_chat_history(LOG_CHANNEL, limit=1000):
-            if msg.text:
-                anime_names.append(msg.text.strip().lower())
-        await message.reply(f"✅ Refreshed {len(anime_names)} anime names from log channel.")
-    except Exception as e:
-        await message.reply(f"❌ Failed to fetch anime names: {e}")
-        logger.error(f"Failed to fetch anime names: {e}")
-
-# Function to parse filename details
-def extract_info(filename: str):
-    name = filename.rsplit('.', 1)[0]  # Remove file extension
-    name = name.replace('_', ' ').replace('.', ' ')
-
-    # Extract quality
-    quality_match = re.search(r'(\d{3,4})[pP]', name)
-    quality = quality_match.group(1).lower() + 'p' if quality_match else "unknown"
-    if quality == '360p':
-        quality = '480p'
-
-    # Extract episode
-    episode_match = re.search(r'[Ee]p?(\d{1,3})', name)
-    episode = episode_match.group(1) if episode_match else "unknown"
-
-    # Extract season with leading zero, default S01
-    season_match = re.search(r'[Ss](\d{1,2})', name)
-    if season_match:
-        season = f"S{int(season_match.group(1)):02}"
-    else:
-        season = "S01"
-
-    # Clean anime name by removing quality, season, episode, and common tags
-    anime_title = name
-    anime_title = re.sub(r'\b\d{3,4}[pP]\b', '', anime_title)
-    anime_title = re.sub(r'[Ss]\d{1,2}', '', anime_title)
-    anime_title = re.sub(r'[Ee]p?\d{1,3}', '', anime_title)
-    anime_title = re.sub(r'\b(mp4|mkv|avi|flv|mov|mp3|web-dl|bluray|webrip|x264|h264|hevc|10bit|aac|dual|audio|dub)\b', '', anime_title, flags=re.IGNORECASE)
-    anime_title = re.sub(r'[\W_]+', ' ', anime_title).strip()
-
-    return anime_title.lower(), season, episode, quality
-
-# Match anime name with log channel names
-def match_anime_name(extracted_name):
-    for name in anime_names:
-        if name in extracted_name:
-            return name.title()
-    return extracted_name.title()
-
-# Main handler: reply with file + caption
-@app.on_message(filters.document | filters.video | filters.audio)
-async def handle_media(_, message: Message):
-    try:
-        media = message.document or message.video or message.audio
-        if not media or not media.file_name:
-            await message.reply("❌ Could not detect filename.")
-            return
-
-        anime_raw, season, episode, quality = extract_info(media.file_name)
-        anime_name = match_anime_name(anime_raw)
-
-        caption = f"""<b>➥ {anime_name} [{season}]
-🎬 Episode - {episode}
-🎧 Language - Hindi #Official
-🔎 Quality : {quality}
-📡 Powered by :
+# Default caption format
+DEFAULT_CAPTION = """<b>➥ {AnimeName} [{Sn}]
+🎬 Episode - {Ep}
+🎧 Language - Hindi #Official
+🔎 Quality : {Quality}
+📡 Powered by :
 @CrunchyRollChannel.</b>"""
 
-        # Re-send media with caption
-        if message.document:
-            await app.send_document(
-                chat_id=message.chat.id,
-                document=media.file_id,
-                caption=caption,
-                parse_mode="html"
-            )
-        elif message.video:
-            await app.send_video(
-                chat_id=message.chat.id,
-                video=media.file_id,
-                caption=caption,
-                parse_mode="html"
-            )
-        elif message.audio:
-            await app.send_audio(
-                chat_id=message.chat.id,
-                audio=media.file_id,
-                caption=caption,
-                parse_mode="html"
-            )
+# Create bot client
+app = Client("anime_caption_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-        # Delete original message to avoid duplicates
-        await message.delete()
+# Store anime names temporarily
+anime_names = []
 
-    except RPCError as e:
-        logger.error(f"Telegram API error: {e}")
-        await message.reply(f"❌ Telegram API error: {e}")
-    except Exception as e:
-        logger.exception(f"Unexpected error: {e}")
-        await message.reply(f"❌ Unexpected error occurred.")
+def similar(a, b):
+    return SequenceMatcher(None, a.lower(), b.lower()).ratio()
 
-# Basic start command
-@app.on_message(filters.command("start") & filters.private)
-async def start_cmd(_, message: Message):
-    await message.reply("I am a private bot of @World_Fastest_Bots")
+def find_closest_anime_name(filename: str):
+    best_match = None
+    best_ratio = 0.0
+    for name in anime_names:
+        ratio = similar(filename, name)
+        if ratio >= 0.5 and ratio > best_ratio:
+            best_ratio = ratio
+            best_match = name
+    return best_match
 
-# Basic help command
-@app.on_message(filters.command(["help", "help1"]) & filters.private)
-async def help_cmd(_, message: Message):
-    help_text = (
-        "/refreshanimes - Fetch latest anime names from log channel\n"
-        "Send me a video or document and I will caption it automatically."
+def extract_info_from_filename(filename: str):
+    filename = filename.lower()
+
+    # Patterns
+    season_match = re.search(r's(?:eason)?[_\s]?(0?\d{1,2})', filename)
+    episode_match = re.search(r'e(?:pisode)?[_\s]?(0?\d{1,3})', filename)
+    quality_match = re.search(r'[_\s\-]([0-9]{3,4}p)', filename)
+
+    sn = f"S{season_match.group(1).zfill(2)}" if season_match else "S01"
+    ep = episode_match.group(1).zfill(2) if episode_match else "01"
+    quality = quality_match.group(1).lower() if quality_match else "480p"
+
+    anime_name = find_closest_anime_name(filename)
+    if not anime_name:
+        anime_name = "Unknown Anime"
+
+    return anime_name, sn, ep, quality
+
+@app.on_message(filters.command("start"))
+async def start(_, message: Message):
+    await message.reply_text(
+        "**👋 Welcome to the Anime Caption Bot!**\n\n"
+        "➤ Add anime names using `/addanime Solo Leveling`\n"
+        "➤ Send a file and I'll auto-generate a caption.\n"
+        "➤ Use `/help1` for all commands."
     )
-    await message.reply(help_text)
 
-app.run()
+@app.on_message(filters.command("help1"))
+async def help_cmd(_, message: Message):
+    await message.reply_text(
+        "**🛠 Bot Commands:**\n\n"
+        "`/addanime <name>` – Add an anime name\n"
+        "`/delanime <name>` – Delete an anime name\n"
+        "`/listanime` – View added anime names\n"
+        "`/start` – Show welcome message\n"
+        "Just send any anime episode file and I’ll auto-caption it!"
+    )
+
+@app.on_message(filters.command("addanime"))
+async def add_anime(_, message: Message):
+    try:
+        name = message.text.split(None, 1)[1].strip()
+    except IndexError:
+        return await message.reply("❌ Usage: `/addanime <anime name>`")
+
+    anime_names.append(name)
+    await message.reply(f"✅ Anime name added: **{name}**")
+
+@app.on_message(filters.command("delanime"))
+async def del_anime(_, message: Message):
+    try:
+        name = message.text.split(None, 1)[1].strip()
+    except IndexError:
+        return await message.reply("❌ Usage: `/delanime <anime name>`")
+
+    try:
+        anime_names.remove(name)
+        await message.reply(f"🗑️ Anime name deleted: **{name}**")
+    except ValueError:
+        await message.reply("❌ Anime name not found!")
+
+@app.on_message(filters.command("listanime"))
+async def list_animes(_, message: Message):
+    if not anime_names:
+        return await message.reply("📭 No anime names added yet.")
+    await message.reply("📜 **Anime Names List:**\n\n" + "\n".join(f"• {name}" for name in anime_names))
+
+@app.on_message(filters.document | filters.video | filters.audio)
+async def caption_generator(_, message: Message):
+    media = message.document or message.video or message.audio
+    if not media or not media.file_name:
+        return
+
+    filename = media.file_name
+    anime_name, sn, ep, quality = extract_info_from_filename(filename)
+
+    caption = DEFAULT_CAPTION.format(AnimeName=anime_name, Sn=sn, Ep=ep, Quality=quality)
+    await message.reply(caption)
+
+if __name__ == "__main__":
+    app.run()
