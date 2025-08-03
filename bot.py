@@ -1,97 +1,101 @@
 from pyrogram import Client, filters
 from pyrogram.types import Message
 import re
+import httpx
+import asyncio
 
 # BOT CONFIG
 API_ID = 22768311
 API_HASH = "702d8884f48b42e865425391432b3794"
 BOT_TOKEN = ""
 
-# Default Caption Template
+# Default caption template
 default_caption = """<b>➥ {AnimeName} [{Sn}]
-🎬 Episode - {Ep}
-🎧 Language - Hindi #Official
-🔎 Quality : {Quality}
-📡 Powered by :
+🎬 Episode - {Ep}
+🎧 Language - Hindi #Official
+🔎 Quality : {Quality}
+📡 Powered by :
 @CrunchyRollChannel.</b>"""
 
-# In-Memory Storage for Custom Captions (per channel)
 channel_captions = {}
+title_cache = {}  # Cache raw_name -> corrected title
 
 app = Client("AutoCaptionBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# START COMMAND
-@app.on_message(filters.command("start") & filters.private)
-async def start_cmd(_, message: Message):
-    await message.reply_text("I am a private bot of @World_Fastest_Bots")
+async def fetch_title(name: str) -> str:
+    name = name.strip()
+    if not name:
+        return name
+    if name in title_cache:
+        return title_cache[name]
 
-# HELP COMMAND
-@app.on_message(filters.command("help1") & filters.private)
-async def help_cmd(_, message: Message):
-    help_text = ("/setcaption - Set custom caption (Use in channel)\n"
-                 "/showcaption - Show current caption\n"
-                 "➜ Add me as admin in your channel with 'Post Messages' permission.")
-    await message.reply_text(help_text)
+    query = """
+    query ($search: String) {
+      Media(search: $search, type: ANIME) {
+        title { english romaji }
+      }
+    }
+    """
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            resp = await client.post("https://graphql.anilist.co",
+                                     json={"query": query, "variables": {"search": name}})
+        data = resp.json().get("data", {}).get("Media")
+        if data:
+            title = data["title"].get("english") or data["title"].get("romaji") or name
+        else:
+            title = name
+    except Exception:
+        title = name
 
-# SET CUSTOM CAPTION (Channel only)
+    title_cache[name] = title
+    return title
+
 @app.on_message(filters.command("setcaption") & filters.channel)
 async def set_caption(_, message: Message):
     if len(message.command) < 2:
-        return await message.reply_text("Usage: /setcaption Your_Custom_Caption_With_Placeholders")
+        return await message.reply_text("Usage: /setcaption Your caption with {AnimeName}, {Sn}, {Ep}, {Quality}")
+    channel_captions[message.chat.id] = message.text.split(" ", 1)[1]
+    await message.reply_text("✅ Caption set (will reset on restart).")
 
-    custom_caption = message.text.split(" ", 1)[1]
-    channel_captions[message.chat.id] = custom_caption
-    await message.reply_text("✅ Custom caption set successfully (will reset on restart)!")
-
-# SHOW CURRENT CAPTION
 @app.on_message(filters.command("showcaption") & filters.channel)
 async def show_caption(_, message: Message):
-    current_caption = channel_captions.get(message.chat.id, default_caption)
-    await message.reply_text(f"**Current Caption Template:**\n\n{current_caption}")
+    cap = channel_captions.get(message.chat.id, default_caption)
+    await message.reply_text(f"**Current template:**\n\n{cap}")
 
-# AUTO CAPTION (Channels only)
 @app.on_message(filters.channel & (filters.video | filters.document))
 async def auto_caption(_, message: Message):
-    file_name = message.document.file_name if message.document else message.video.file_name
+    fname = message.document.file_name if message.document else message.video.file_name
 
-    # Extract details using regex
-    match = re.search(r"(?:\[.*?\]\s*)?(.+?)\s(S\d+)(E\d+).*?(\d{3,4}p)", file_name, re.IGNORECASE)
-    if not match:
+    clean = re.sub(r'^[\[\(].*?[\]\)]\s*', '', fname)
+
+    m = re.search(r"(.+?)[\s\[\(\-_]+S?(\d{1,2})[xEx\-]?E?(\d{1,2}).*?(\d{3,4}p)?",
+                  clean, re.IGNORECASE)
+    if not m:
         return
 
-    AnimeName, Sn, Ep, Quality = match.groups()
-    Ep = Ep.replace("E", "")
+    raw_name, sn_raw, ep_raw, q = m.groups()
+    sn = f"S{int(sn_raw):02d}"
+    ep = f"{int(ep_raw):02d}"
+    quality = (q.lower() if q else "unknown").replace("360p", "480p")
 
-    # Replace 360p with 480p in captions
-    Quality = Quality.replace("360p", "480p")
+    raw_name = raw_name.strip().rstrip('._-')
+    anime = await fetch_title(raw_name)
 
-    # Get custom caption or default
-    caption_template = channel_captions.get(message.chat.id, default_caption)
-
-    caption_text = caption_template.format(
-        AnimeName=AnimeName.strip(),
-        Sn=Sn.upper(),
-        Ep=Ep,
-        Quality=Quality
-    )
+    cap_tmpl = channel_captions.get(message.chat.id, default_caption)
+    caption = cap_tmpl.format(AnimeName=anime, Sn=sn, Ep=ep, Quality=quality)
 
     try:
-        # Repost the file with the caption and delete original
         if message.document:
-            await app.send_document(
-                chat_id=message.chat.id,
-                document=message.document.file_id,
-                caption=caption_text
-            )
+            await app.send_document(chat_id=message.chat.id,
+                                     document=message.document.file_id,
+                                     caption=caption)
         else:
-            await app.send_video(
-                chat_id=message.chat.id,
-                video=message.video.file_id,
-                caption=caption_text
-            )
-
+            await app.send_video(chat_id=message.chat.id,
+                                 video=message.video.file_id,
+                                 caption=caption)
         await message.delete()
     except Exception as e:
-        await message.reply_text(f"❌ Error sending file: {e}")
+        await message.reply_text(f"❌ Error reposting: {e}")
 
 app.run()
