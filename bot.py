@@ -1,86 +1,113 @@
-import re from pyrogram import Client, filters from pyrogram.types import Message
+import re
+import logging
+import asyncio
+import httpx
+from pyrogram import Client, filters
+from pyrogram.types import Message
 
-BOT CONFIG
-
-API_ID = 22768311 API_HASH = "702d8884f48b42e865425391432b3794" BOT_TOKEN = ""
-
-Default Caption Template
-
-default_caption = """<b>➞ {AnimeName} [{Sn}] 🎬 Episode - {Ep} 🎷 Language - Hindi #Official 🔎 Quality : {Quality} 📱 Powered by : @CrunchyRollChannel.</b>"""
-
-In-Memory Storage for Custom Captions (per channel)
-
-channel_captions = {}
+# === CONFIGURATION ===
+API_ID = 22768311  # your api id here
+API_HASH = "702d8884f48b42e865425391432b3794"  # your api hash here
+BOT_TOKEN = "your_bot_token"  # your bot token here
 
 app = Client("AutoCaptionBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-START COMMAND
+# === Default Caption Template (bold, multiline, with placeholders) ===
+DEFAULT_CAPTION = """<b>➥ {AnimeName} [{Sn}]
+🎬 Episode - {Ep}
+🎧 Language - Hindi #Official
+🔎 Quality : {Quality}
+📡 Powered by :
+@CrunchyRollChannel.</b>"""
 
-@app.on_message(filters.command("start") & filters.private) async def start_cmd(_, message: Message): await message.reply_text("I am a private bot of @World_Fastest_Bots")
+# === Helper: Query AniList for English anime title ===
+async def get_anime_title(filename: str) -> str:
+    # Clean filename to search query
+    cleaned = re.sub(r'[\[\]()_.-]', ' ', filename)  # remove []()_.-
+    cleaned = re.sub(r'\d{3,4}[pP]', '', cleaned)  # remove quality from name
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
 
-HELP COMMAND
+    query = '''
+    query ($search: String) {
+      Media(search: $search, type: ANIME) {
+        title {
+          english
+          romaji
+          native
+        }
+      }
+    }
+    '''
+    variables = {"search": cleaned}
 
-@app.on_message(filters.command("help1") & filters.private) async def help_cmd(_, message: Message): help_text = ("/setcaption - Set custom caption (Use in channel)\n" "/showcaption - Show current caption\n" "➞ Add me as admin in your channel with 'Post Messages' permission.") await message.reply_text(help_text)
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post("https://graphql.anilist.co", json={"query": query, "variables": variables})
+            response.raise_for_status()
+            data = response.json()
+            media = data.get("data", {}).get("Media")
+            if media:
+                # Return English if exists, else Romaji, else Native, else fallback to cleaned filename
+                return media["title"].get("english") or media["title"].get("romaji") or media["title"].get("native") or cleaned
+            else:
+                return cleaned
+        except Exception as e:
+            logging.error(f"Error fetching from AniList: {e}")
+            return cleaned
 
-SET CUSTOM CAPTION (Channel only)
+# === Helper: Extract season, episode, quality from filename ===
+def extract_sn_ep_quality(filename: str):
+    # Season (S01), Episode (E05)
+    sn_match = re.search(r'(S\d{1,2})', filename, re.IGNORECASE)
+    ep_match = re.search(r'(E\d{1,3})', filename, re.IGNORECASE)
+    quality_match = re.search(r'(\d{3,4})[pP]', filename)
 
-@app.on_message(filters.command("setcaption") & filters.channel) async def set_caption(_, message: Message): if len(message.command) < 2: return await message.reply_text("Usage: /setcaption Your_Custom_Caption_With_Placeholders")
+    Sn = sn_match.group(1).upper() if sn_match else "S01"
+    Ep = ep_match.group(1).upper().replace("E", "") if ep_match else "01"
 
-custom_caption = message.text.split(" ", 1)[1]
-channel_captions[message.chat.id] = custom_caption
-await message.reply_text("✅ Custom caption set successfully (will reset on restart)!")
-
-SHOW CURRENT CAPTION
-
-@app.on_message(filters.command("showcaption") & filters.channel) async def show_caption(_, message: Message): current_caption = channel_captions.get(message.chat.id, default_caption) await message.reply_text(f"Current Caption Template:\n\n{current_caption}")
-
-AUTO CAPTION (Channels only)
-
-@app.on_message(filters.channel & (filters.video | filters.document)) async def auto_caption(_, message: Message): file_name = None if message.document: file_name = message.document.file_name elif message.video: file_name = message.video.file_name
-
-if not file_name:
-    return
-
-# Extract details using regex
-match = re.search(r"(?:\s*)?(.+?)\s(S\d+)(E\d+).*?(\d{3,4}p)", file_name, re.IGNORECASE)
-if not match:
-    return
-
-AnimeName, Sn, Ep, Quality = match.groups()
-Ep = Ep.replace("E", "")
-
-# Replace 360p with 480p in captions
-Quality = Quality.replace("360p", "480p")
-
-# Get custom caption or default
-caption_template = channel_captions.get(message.chat.id, default_caption)
-
-caption_text = caption_template.format(
-    AnimeName=AnimeName.strip(),
-    Sn=Sn.upper(),
-    Ep=Ep,
-    Quality=Quality
-)
-
-try:
-    # Repost the file with the caption and delete original
-    if message.document:
-        await app.send_document(
-            chat_id=message.chat.id,
-            document=message.document.file_id,
-            caption=caption_text
-        )
+    if quality_match:
+        q = quality_match.group(1)
+        if q == "360":
+            q = "480"
+        Quality = f"{q.lower()}p"
     else:
-        await app.send_video(
-            chat_id=message.chat.id,
-            video=message.video.file_id,
-            caption=caption_text
-        )
+        Quality = "480p"
 
-    await message.delete()
+    return Sn, Ep, Quality
 
-except Exception as e:
-    await message.reply_text(f"❌ Error sending file: {e}")
+# === Message handler for video/document in channels or private ===
+@app.on_message(filters.video | filters.document)
+async def auto_caption(client: Client, message: Message):
+    media = message.video or message.document
+    if not media or not media.file_name:
+        return  # no filename, do nothing
 
-app.run()
+    file_name = media.file_name
 
+    # Get anime title from AniList API
+    anime_title = await get_anime_title(file_name)
+
+    # Extract season, episode, quality
+    Sn, Ep, Quality = extract_sn_ep_quality(file_name)
+
+    # Format caption with default caption template
+    caption_text = DEFAULT_CAPTION.format(AnimeName=anime_title.strip(), Sn=Sn, Ep=Ep, Quality=Quality)
+
+    try:
+        # Resend media with new caption and delete original message if in group/channel (optional)
+        if message.video:
+            await message.reply_video(video=media.file_id, caption=caption_text, parse_mode="html")
+        else:
+            await message.reply_document(document=media.file_id, caption=caption_text, parse_mode="html")
+
+        # Optional: delete original file message
+        # await message.delete()
+
+    except Exception as e:
+        logging.error(f"Error resending media: {e}")
+        await message.reply(f"❌ Error: {e}")
+
+# === Start the bot ===
+if __name__ == "__main__":
+    print("Bot is running...")
+    app.run()
