@@ -4,100 +4,89 @@ import aiohttp
 from pyrogram import Client, filters
 from pyrogram.types import Message
 
-# Logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Bot Token & API keys
-API_ID = 22768311      # replace with your api_id
-API_HASH = "702d8884f48b42e865425391432b3794"  # replace with your api_hash
-BOT_TOKEN = ""  # replace with your bot token
+API_ID = 22768311
+API_HASH = "702d8884f48b42e865425391432b3794"
+BOT_TOKEN = ""
 
-# Initialize bot
-app = Client("my_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+app = Client("EpisodeSortBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# ➤ Anime title finder using AniList API
-async def get_anime_name_from_anilist(query: str) -> str:
-    try:
-        url = "https://graphql.anilist.co"
-        query_payload = {
-            "query": """
-                query ($search: String) {
-                  Media(search: $search, type: ANIME) {
+# Default caption
+DEFAULT_CAPTION = """<b>➥ {AnimeName} [{Sn}]
+🎬 Episode - {Ep}
+🎧 Language - Hindi #Official
+🔎 Quality : {Quality}
+📡 Powered by :
+@CrunchyRollChannel.</b>"""
+
+# AniList API function
+async def fetch_anilist_title(query: str) -> str:
+    url = "https://graphql.anilist.co"
+    query_data = {
+        "query": '''
+            query ($search: String) {
+                Media(search: $search, type: ANIME) {
                     title {
-                      romaji
+                        romaji
                     }
-                  }
                 }
-            """,
-            "variables": {
-                "search": query
             }
-        }
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=query_payload) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    return data["data"]["Media"]["title"]["romaji"]
-                else:
-                    logger.error(f"AniList fetch error: {response.status}")
-    except Exception as e:
-        logger.error(f"Error fetching from AniList: {e}")
-    return "Unknown Anime"
+        ''',
+        "variables": {"search": query}
+    }
 
-# ➤ File name parser
-def parse_filename(filename: str):
-    sn_match = re.search(r'S(\d+)', filename, re.IGNORECASE)
-    ep_match = re.search(r'EP?(\d+)', filename, re.IGNORECASE)
-    quality_match = re.search(r'(\d{3,4})[Pp]', filename)
-
-    sn = f"Season {sn_match.group(1)}" if sn_match else "Unknown Season"
-    ep = ep_match.group(1) if ep_match else "00"
-    quality = quality_match.group(1) + "p" if quality_match else "480p"
-    quality = "480p" if quality == "360p" else quality.lower()
-
-    return sn, ep, quality
-
-# ➤ Default Caption Template
-DEFAULT_CAPTION_TEMPLATE = (
-    "<b>➥ {AnimeName} [{Sn}]\n"
-    "🎬 Episode - {Ep}\n"
-    "🎧 Language - Hindi #Official\n"
-    "🔎 Quality : {Quality}\n"
-    "📡 Powered by :\n"
-    "@CrunchyRollChannel.</b>"
-)
-
-# ➤ Media Handler
-@app.on_message(filters.channel & (filters.video | filters.document | filters.photo))
-async def media_handler(_, message: Message):
     try:
-        if message.caption:
-            filename = message.caption
-        elif message.document and message.document.file_name:
-            filename = message.document.file_name
-        elif message.video and message.video.file_name:
-            filename = message.video.file_name
-        else:
-            filename = "Unknown Filename"
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=query_data) as resp:
+                if resp.status != 200:
+                    logger.error(f"AniList fetch error: {resp.status}")
+                    return query
+                data = await resp.json()
+                return data["data"]["Media"]["title"]["romaji"]
+    except Exception as e:
+        logger.error(f"AniList fetch error: {e}")
+        return query
 
-        sn, ep, quality = parse_filename(filename)
-        anime_name = await get_anime_name_from_anilist(filename)
+# Sort function
+@app.on_message(filters.channel & filters.media)
+async def sort_episode(client: Client, message: Message):
+    try:
+        file_name = message.document.file_name if message.document else \
+                    message.video.file_name if message.video else \
+                    message.caption
 
-        caption = DEFAULT_CAPTION_TEMPLATE.format(
-            AnimeName=anime_name,
-            Sn=sn,
-            Ep=ep,
-            Quality=quality
-        )
+        if not file_name:
+            return
 
-        await message.copy(
-            chat_id=message.chat.id,
-            caption=caption,
-            parse_mode="html"
-        )
+        # Normalize 360p to 480p and lowercase "P"
+        file_name = file_name.replace("360P", "480p").replace("360p", "480p").replace("P", "p")
+
+        # Parse episode
+        episode_match = re.search(r"[Ee]p(?:isode)?[\s._-]*([0-9]+)", file_name)
+        ep = episode_match.group(1) if episode_match else "1"
+
+        # Parse season
+        season_match = re.search(r"[Ss]eason[\s._-]*([0-9]+)", file_name)
+        sn = f"Season {season_match.group(1)}" if season_match else "Season 1"
+
+        # Parse quality
+        quality_match = re.search(r"(\d{3,4}p)", file_name)
+        quality = quality_match.group(1).lower() if quality_match else "480p"
+
+        # Get anime name
+        name_cleaned = re.sub(r"[\s._-]*(ep|episode|season)[\s._-]*\d+", "", file_name, flags=re.I)
+        name_cleaned = re.sub(r"\[.*?\]|\(.*?\)|\{.*?\}", "", name_cleaned)
+        name_cleaned = re.sub(r"[\s._-]+", " ", name_cleaned).strip()
+
+        anime_name = await fetch_anilist_title(name_cleaned)
+
+        caption = DEFAULT_CAPTION.format(AnimeName=anime_name, Sn=sn, Ep=ep, Quality=quality)
+
+        await message.copy(chat_id=message.chat.id, caption=caption, parse_mode="html")
+
     except Exception as e:
         logger.error(f"Error sending media: {e}")
 
-# ➤ Start Bot
 app.run()
