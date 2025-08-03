@@ -1,101 +1,92 @@
 from pyrogram import Client, filters
 from pyrogram.types import Message
-import re
-import httpx
-import asyncio
+import os
 
-# BOT CONFIG
-API_ID = 22768311
+API_ID = 22768311  # Replace with your own
 API_HASH = "702d8884f48b42e865425391432b3794"
 BOT_TOKEN = ""
 
-# Default caption template
-default_caption = """<b>➥ {AnimeName} [{Sn}]
-🎬 Episode - {Ep}
-🎧 Language - Hindi #Official
-🔎 Quality : {Quality}
-📡 Powered by :
-@CrunchyRollChannel.</b>"""
+app = Client("AnimeNameBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-channel_captions = {}
-title_cache = {}  # Cache raw_name -> corrected title
+ANIME_NAMES_FILE = "anime_names.txt"
 
-app = Client("AutoCaptionBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+def load_anime_names():
+    if not os.path.exists(ANIME_NAMES_FILE):
+        return []
+    with open(ANIME_NAMES_FILE, "r", encoding="utf-8") as f:
+        return [line.strip() for line in f if line.strip()]
 
-async def fetch_title(name: str) -> str:
-    name = name.strip()
-    if not name:
-        return name
-    if name in title_cache:
-        return title_cache[name]
+def save_anime_names(names):
+    with open(ANIME_NAMES_FILE, "w", encoding="utf-8") as f:
+        f.write("\n".join(names))
 
-    query = """
-    query ($search: String) {
-      Media(search: $search, type: ANIME) {
-        title { english romaji }
-      }
-    }
-    """
+def add_anime_names(new_names):
+    current_names = load_anime_names()
+    for name in new_names:
+        if name and name not in current_names:
+            current_names.append(name)
+    save_anime_names(current_names)
+    return current_names
+
+def delete_anime_name(name_to_delete):
+    current_names = load_anime_names()
+    updated = [name for name in current_names if name.lower() != name_to_delete.lower()]
+    save_anime_names(updated)
+    return updated
+
+def match_anime_name(filename):
+    anime_names = load_anime_names()
+    filename_lower = filename.lower()
+    best_match = ""
+    max_length = 0
+    for name in anime_names:
+        cleaned = name.lower().replace("’", "'")
+        if cleaned in filename_lower and len(cleaned) > max_length:
+            best_match = name
+            max_length = len(cleaned)
+    return best_match if best_match else "Unknown"
+
+@app.on_message(filters.command("adanimename") & filters.private)
+async def add_names(client, message: Message):
+    lines = message.text.split("\n")[1:]  # Remove command part
+    if not lines:
+        return await message.reply("❌ Please provide anime names after the command.")
+    added = add_anime_names(lines)
+    await message.reply(f"✅ Anime names added.\n\n📋 Total Saved Names:\n" + "\n".join(added))
+
+@app.on_message(filters.command("delanimename") & filters.private)
+async def delete_name(client, message: Message):
     try:
-        async with httpx.AsyncClient(timeout=8) as client:
-            resp = await client.post("https://graphql.anilist.co",
-                                     json={"query": query, "variables": {"search": name}})
-        data = resp.json().get("data", {}).get("Media")
-        if data:
-            title = data["title"].get("english") or data["title"].get("romaji") or name
-        else:
-            title = name
-    except Exception:
-        title = name
+        name_to_delete = message.text.split(" ", 1)[1].strip()
+    except IndexError:
+        return await message.reply("❌ Usage: /delanimename <Anime Name>")
+    
+    updated = delete_anime_name(name_to_delete)
+    await message.reply(f"✅ Deleted (if existed): `{name_to_delete}`\n\n📋 Updated List:\n" + "\n".join(updated))
 
-    title_cache[name] = title
-    return title
-
-@app.on_message(filters.command("setcaption") & filters.channel)
-async def set_caption(_, message: Message):
-    if len(message.command) < 2:
-        return await message.reply_text("Usage: /setcaption Your caption with {AnimeName}, {Sn}, {Ep}, {Quality}")
-    channel_captions[message.chat.id] = message.text.split(" ", 1)[1]
-    await message.reply_text("✅ Caption set (will reset on restart).")
-
-@app.on_message(filters.command("showcaption") & filters.channel)
-async def show_caption(_, message: Message):
-    cap = channel_captions.get(message.chat.id, default_caption)
-    await message.reply_text(f"**Current template:**\n\n{cap}")
-
-@app.on_message(filters.channel & (filters.video | filters.document))
-async def auto_caption(_, message: Message):
-    fname = message.document.file_name if message.document else message.video.file_name
-
-    clean = re.sub(r'^[\[\(].*?[\]\)]\s*', '', fname)
-
-    m = re.search(r"(.+?)[\s\[\(\-_]+S?(\d{1,2})[xEx\-]?E?(\d{1,2}).*?(\d{3,4}p)?",
-                  clean, re.IGNORECASE)
-    if not m:
-        return
-
-    raw_name, sn_raw, ep_raw, q = m.groups()
-    sn = f"S{int(sn_raw):02d}"
-    ep = f"{int(ep_raw):02d}"
-    quality = (q.lower() if q else "unknown").replace("360p", "480p")
-
-    raw_name = raw_name.strip().rstrip('._-')
-    anime = await fetch_title(raw_name)
-
-    cap_tmpl = channel_captions.get(message.chat.id, default_caption)
-    caption = cap_tmpl.format(AnimeName=anime, Sn=sn, Ep=ep, Quality=quality)
-
+@app.on_message(filters.command("matchanime") & filters.private)
+async def match_command(client, message: Message):
     try:
-        if message.document:
-            await app.send_document(chat_id=message.chat.id,
-                                     document=message.document.file_id,
-                                     caption=caption)
-        else:
-            await app.send_video(chat_id=message.chat.id,
-                                 video=message.video.file_id,
-                                 caption=caption)
-        await message.delete()
-    except Exception as e:
-        await message.reply_text(f"❌ Error reposting: {e}")
+        filename = message.text.split(" ", 1)[1].strip()
+    except IndexError:
+        return await message.reply("❌ Usage: /matchanime <File Name>")
+    
+    match = match_anime_name(filename)
+    await message.reply(f"🎯 Matched Anime Name: `{match}`")
+
+@app.on_message(filters.command("showanimenames") & filters.private)
+async def show_all_names(client, message: Message):
+    names = load_anime_names()
+    if not names:
+        return await message.reply("No anime names added yet.")
+    await message.reply("📋 Saved Anime Names:\n" + "\n".join(names))
+
+@app.on_message(filters.command("start") & filters.private)
+async def start(client, message: Message):
+    await message.reply("👋 Hello! Use the following commands:\n\n"
+                        "/adanimename - Add anime names (each in new line)\n"
+                        "/delanimename <name> - Delete an anime name\n"
+                        "/matchanime <file name> - Match file name to anime\n"
+                        "/showanimenames - Show all saved anime names")
 
 app.run()
