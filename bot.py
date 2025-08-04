@@ -4,9 +4,9 @@ import re
 import difflib
 
 # BOT CONFIG
-API_ID = 22768311  # replace with your actual API_ID
-API_HASH = "702d8884f48b42e865425391432b3794"  # replace with your API_HASH
-BOT_TOKEN = ""  # replace with your BOT_TOKEN
+API_ID = 22768311  # 🔁 Replace with your API_ID
+API_HASH = "702d8884f48b42e865425391432b3794"  # 🔁 Replace with your API_HASH
+BOT_TOKEN = ""  # 🔁 Replace with your BOT_TOKEN
 
 # Default Caption Template
 default_caption = """<b>➥ {AnimeName} [{Sn}]
@@ -17,21 +17,21 @@ default_caption = """<b>➥ {AnimeName} [{Sn}]
 @CrunchyRollChannel.</b>"""
 
 # In-Memory Storage
-channel_captions = {}  # for per-channel custom captions
-anime_names = []       # global list of added anime names (resets on restart)
+channel_captions = {}  # channel-specific caption templates
+anime_names = []       # global anime name list (resets on restart)
 
 # Initialize Pyrogram Client
 app = Client("AutoCaptionBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 
-# START COMMAND
-@app.on_message(filters.command("start") & filters.private)
+# START
+@app.on_message(filters.command("start"))
 async def start_cmd(_, message: Message):
-    await message.reply_text("I am a private bot of @World_Fastest_Bots")
+    await message.reply_text("👋 I am the fastest auto-caption bot by @World_Fastest_Bots!")
 
 
-# HELP COMMAND
-@app.on_message(filters.command("help1") & filters.private)
+# HELP
+@app.on_message(filters.command("help1"))
 async def help_cmd(_, message: Message):
     help_text = (
         "**Available Commands:**\n\n"
@@ -40,7 +40,7 @@ async def help_cmd(_, message: Message):
         "/addanimename <Name> – Add an anime name\n"
         "/listanimename – List all added anime names\n"
         "/deleteanimename <Name> – Delete a specific anime name\n\n"
-        "➜ Add me as admin in your channel with 'Post Messages' permission."
+        "⚙️ Use me in your channel as admin with 'Post Messages' permission!"
     )
     await message.reply_text(help_text)
 
@@ -49,11 +49,11 @@ async def help_cmd(_, message: Message):
 @app.on_message(filters.command("setcaption") & filters.channel)
 async def set_caption(_, message: Message):
     if len(message.command) < 2:
-        return await message.reply_text("Usage: /setcaption Your_Custom_Caption_With_Placeholders")
+        return await message.reply_text("❌ Usage:\n/setcaption <Your Custom Caption>")
 
     custom_caption = message.text.split(" ", 1)[1]
     channel_captions[message.chat.id] = custom_caption
-    await message.reply_text("✅ Custom caption set successfully (will reset on restart)!")
+    await message.reply_text("✅ Custom caption set for this channel!")
 
 
 # SHOW CURRENT CAPTION
@@ -64,62 +64,69 @@ async def show_caption(_, message: Message):
 
 
 # ADD ANIME NAME
-@app.on_message(filters.command("addanimename") & filters.private)
+@app.on_message(filters.command("addanimename"))
 async def add_anime_name(_, message: Message):
     if len(message.command) < 2:
-        return await message.reply_text("Usage: /addanimename <Anime Name>")
-    
+        return await message.reply_text("❌ Usage:\n/addanimename <Anime Name>")
+
     anime_name = message.text.split(" ", 1)[1].strip()
-    
+
     if anime_name in anime_names:
-        return await message.reply_text("❗ Anime name already exists.")
-    
+        return await message.reply_text("⚠️ Anime name already exists.")
+
     anime_names.append(anime_name)
-    await message.reply_text(f"✅ Anime name added: `{anime_name}`")
+    await message.reply_text(f"✅ Added anime name: `{anime_name}`")
 
 
 # LIST ANIME NAMES
-@app.on_message(filters.command("listanimename") & filters.private)
+@app.on_message(filters.command("listanimename"))
 async def list_anime_names(_, message: Message):
     if not anime_names:
-        return await message.reply_text("No anime names added yet.")
-    
+        return await message.reply_text("📭 No anime names added yet.")
+
     reply_text = "**📺 Stored Anime Names:**\n\n"
     reply_text += "\n".join(f"{i+1}. {name}" for i, name in enumerate(anime_names))
     await message.reply_text(reply_text)
 
 
 # DELETE ANIME NAME
-@app.on_message(filters.command("deleteanimename") & filters.private)
+@app.on_message(filters.command("deleteanimename"))
 async def delete_anime_name(_, message: Message):
     if len(message.command) < 2:
-        return await message.reply_text("Usage: /deleteanimename <Anime Name>")
-    
+        return await message.reply_text("❌ Usage:\n/deleteanimename <Anime Name>")
+
     anime_name = message.text.split(" ", 1)[1].strip()
-    
+
     if anime_name not in anime_names:
         return await message.reply_text("❌ Anime name not found.")
-    
+
     anime_names.remove(anime_name)
-    await message.reply_text(f"✅ Anime name deleted: `{anime_name}`")
+    await message.reply_text(f"✅ Deleted anime name: `{anime_name}`")
 
 
-# AUTO CAPTION HANDLER (Channels Only)
+# AUTO CAPTION ON FILE UPLOAD
 @app.on_message(filters.channel & (filters.video | filters.document))
 async def auto_caption(_, message: Message):
-    file_name = message.document.file_name if message.document else message.video.file_name
+    file_name = None
+    if message.document and message.document.file_name:
+        file_name = message.document.file_name
+    elif message.video and message.video.file_name:
+        file_name = message.video.file_name
 
-    # Extract basic details using regex
+    if not file_name:
+        return  # skip if no filename found
+
+    # Try extracting: Name S01E05 720p
     match = re.search(r"(?:\[.*?\]\s*)?(.+?)\s(S\d+)(E\d+).*?(\d{3,4}p)", file_name, re.IGNORECASE)
     if not match:
-        return  # skip if not matched
+        return  # filename doesn't match expected format
 
     raw_name, Sn, Ep, Quality = match.groups()
     Ep = Ep.replace("E", "")
     Quality = Quality.replace("360p", "480p")
     AnimeName = raw_name.strip()
 
-    # Fuzzy match with stored anime names
+    # Match against stored anime names
     def get_best_match(name, stored_list):
         best_ratio = 0
         best_match = None
@@ -134,9 +141,7 @@ async def auto_caption(_, message: Message):
     if matched_name:
         AnimeName = matched_name
 
-    # Use custom or default caption
     caption_template = channel_captions.get(message.chat.id, default_caption)
-
     caption_text = caption_template.format(
         AnimeName=AnimeName,
         Sn=Sn.upper(),
@@ -157,11 +162,10 @@ async def auto_caption(_, message: Message):
                 video=message.video.file_id,
                 caption=caption_text
             )
-
         await message.delete()
     except Exception as e:
-        await message.reply_text(f"❌ Error sending file: {e}")
+        await message.reply_text(f"❌ Error: {e}")
 
 
-# RUN THE BOT
+# Run the Bot
 app.run()
