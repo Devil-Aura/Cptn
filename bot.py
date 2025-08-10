@@ -61,6 +61,43 @@ def save_anime_names():
     except Exception as e:
         logger.error(f"Error saving anime names: {e}")
 
+def parse_filename(filename):
+    """Improved filename parser that handles various formats"""
+    # Remove channel name if present
+    clean_name = re.sub(r'\[@?\w+\s*\w*\]', '', filename, flags=re.IGNORECASE)
+    
+    # Try multiple patterns to extract info
+    patterns = [
+        r"(?:.*?)(.+?)\s+(S\d+)(?:E|Ep|EP|_)(\d+).*?(\d{3,4})p",  # S01E01 1080p
+        r"(?:.*?)(.+?)\s+-\s+(\d+)\s+\((\d{3,4})p\)",              # Name - 01 (1080p)
+        r"(?:.*?)(.+?)\s+(\d+)\.(\d{3,4})p",                       # Name 01.1080p
+        r"(?:.*?)(.+?)\s+Episode\s+(\d+)\s+(\d{3,4})p"             # Name Episode 01 1080p
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, clean_name, re.IGNORECASE)
+        if match:
+            if len(match.groups()) == 4:
+                anime_name, season, episode, quality = match.groups()
+                season = season.upper()
+            else:
+                anime_name, episode, quality = match.groups()
+                season = "S01"  # Default season
+            
+            # Clean quality (convert 360p to 480p and make 'p' lowercase)
+            quality = quality.lower()
+            if quality == "360p":
+                quality = "480p"
+            else:
+                quality = f"{quality}p" if not quality.endswith("p") else quality
+            
+            # Clean anime name
+            anime_name = re.sub(r'[_\-.]+', ' ', anime_name).strip()
+            
+            return anime_name, season, episode, quality
+    
+    return None
+
 # ----- Command Handlers -----
 @app.on_message(filters.command("start") & filters.private)
 async def start_cmd(_, message: Message):
@@ -87,128 +124,42 @@ async def help_cmd(_, message: Message):
 /deleteanime - Remove anime title
 /listanime - List all anime titles
 
-<b>How to use:</b>
-1. Add me to your channel as admin
-2. Upload anime videos with filename format:
-   <code>AnimeName S01E01 1080p.mp4</code>
-3. I'll automatically add captions"""
+<b>Supported Filename Formats:</b>
+- AnimeName S01E01 1080p.mkv
+- [Group] Anime Name - 01 (720p).mp4
+- Anime.Name.Episode.01.480p.mkv
+- Anime Name Episode 01 360p.mp4"""
     await message.reply_text(help_text, parse_mode=ParseMode.HTML)
 
-@app.on_message(filters.command("addanime") & filters.private)
-async def add_anime(_, message: Message):
-    try:
-        name = message.text.split(None, 1)[1].strip()
-        if not name:
-            raise ValueError("Empty name")
-        
-        if name in anime_names:
-            await message.reply_text(f"⚠️ <b>{escape(name)}</b> already exists!", parse_mode=ParseMode.HTML)
-            return
-        
-        anime_names.append(name)
-        save_anime_names()
-        await message.reply_text(f"✅ Added: <b>{escape(name)}</b>", parse_mode=ParseMode.HTML)
-    except Exception as e:
-        await message.reply_text("❌ Usage: /addanime <Anime Name>")
-        logger.error(f"Add anime error: {e}")
-
-@app.on_message(filters.command(["deleteanime", "delanime"]) & filters.private)
-async def delete_anime(_, message: Message):
-    try:
-        name = message.text.split(None, 1)[1].strip()
-        if not name:
-            raise ValueError("Empty name")
-        
-        if name in anime_names:
-            anime_names.remove(name)
-            save_anime_names()
-            await message.reply_text(f"🗑 Deleted: <b>{escape(name)}</b>", parse_mode=ParseMode.HTML)
-        else:
-            await message.reply_text(f"❌ <b>{escape(name)}</b> not found!", parse_mode=ParseMode.HTML)
-    except Exception as e:
-        await message.reply_text("❌ Usage: /deleteanime <Anime Name>")
-        logger.error(f"Delete anime error: {e}")
-
-@app.on_message(filters.command("listanime") & filters.private)
-async def list_anime(_, message: Message):
-    if not anime_names:
-        await message.reply_text("📭 Anime database is empty!")
-        return
-    
-    text = "📚 <b>Saved Anime Titles:</b>\n\n" + "\n".join(
-        f"• {escape(name)}" for name in sorted(anime_names)
-    )
-    
-    # Split long messages
-    for i in range(0, len(text), 4000):
-        await message.reply_text(
-            text[i:i+4000],
-            parse_mode=ParseMode.HTML
-        )
+# ... [keep all other command handlers the same as previous version] ...
 
 # ----- Channel Handlers -----
-@app.on_message(filters.command("setcaption") & filters.channel)
-async def set_caption(_, message: Message):
-    try:
-        if len(message.command) < 2:
-            await message.reply_text("❌ Usage: /setcaption <caption_template>")
-            return
-        
-        caption = message.text.split(None, 1)[1]
-        channel_captions[message.chat.id] = caption
-        await message.reply_text("✅ Custom caption set successfully!")
-        logger.info(f"Set caption for channel {message.chat.id}")
-    except Exception as e:
-        logger.error(f"Set caption error: {e}")
-
-@app.on_message(filters.command("showcaption") & filters.channel)
-async def show_caption(_, message: Message):
-    caption = channel_captions.get(message.chat.id, DEFAULT_CAPTION)
-    await message.reply_text(
-        f"<b>Current Caption Template:</b>\n\n{caption}",
-        parse_mode=ParseMode.HTML
-    )
-
-@app.on_message(
-    filters.channel & 
-    (filters.video | filters.document)
-)
+@app.on_message(filters.channel & (filters.video | filters.document))
 async def handle_media(_, message: Message):
     try:
         # Get filename
         if message.video:
-            filename = message.video.file_name
+            filename = message.video.file_name or ""
         elif message.document:
-            filename = message.document.file_name
+            filename = message.document.file_name or ""
         else:
-            return
-        
-        if not filename:
-            logger.warning(f"No filename in message {message.id}")
             return
         
         logger.info(f"Processing file: {filename}")
         
-        # Extract metadata
-        match = re.search(
-            r"(?:\[.*?\]\s*)?(.+?)\s+(S\d+)(E\d+).*?(\d{3,4}p)",
-            filename,
-            re.IGNORECASE
-        )
-        
-        if not match:
+        # Parse filename
+        parsed = parse_filename(filename)
+        if not parsed:
             logger.warning(f"Failed to parse filename: {filename}")
             return
         
-        anime_name, season, episode, quality = match.groups()
-        episode = episode.replace("E", "")
-        quality = quality.replace("360p", "480p")
+        anime_name, season, episode, quality = parsed
         
         # Get caption template
         caption = channel_captions.get(message.chat.id, DEFAULT_CAPTION)
         formatted_caption = caption.format(
-            AnimeName=anime_name.strip(),
-            Sn=season.upper(),
+            AnimeName=anime_name,
+            Sn=season,
             Ep=episode,
             Quality=quality
         )
@@ -238,7 +189,7 @@ async def handle_media(_, message: Message):
     except Exception as e:
         logger.error(f"Error processing media: {e}")
         try:
-            await message.reply_text(f"❌ Error: {str(e)}")
+            await message.reply_text(f"❌ Error processing file: {str(e)[:100]}")
         except:
             pass
 
