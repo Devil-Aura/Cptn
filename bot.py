@@ -129,6 +129,8 @@ async def list_anime(_, message: Message):
     await message.reply("📚 **Anime List:**\n" + "\n".join(f"• {name}" for name in anime_names))
 
 # Auto-caption files
+from pyrogram.enums import ParseMode
+
 @app.on_message(filters.document | filters.video | filters.audio)
 async def on_file(_, message: Message):
     media = message.document or message.video or message.audio
@@ -145,7 +147,7 @@ async def on_file(_, message: Message):
         Quality=quality
     )
 
-    await message.reply(caption, parse_mode="html")  # ✅ HTML parse mode fixed
+    await message.reply(caption, parse_mode=ParseMode.HTML)  # ✅ HTML parse mode fixed
 
 if __name__ == "__main__":
     app.run()
