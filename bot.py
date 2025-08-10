@@ -171,8 +171,7 @@ async def show_caption(_, message: Message):
 
 @app.on_message(
     filters.channel & 
-    (filters.video | filters.document) &
-    ~filters.edited
+    (filters.video | filters.document)
 )
 async def handle_media(_, message: Message):
     try:
