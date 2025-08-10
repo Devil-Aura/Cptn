@@ -73,72 +73,54 @@ def extract_info(raw_filename: str) -> Tuple[str, str, str, str]:
 
     orig = raw_filename.strip()
 
-    # Remove extension here safely (only last dot + 1-6 alphanum chars)
-    base_no_ext = re.sub(r'\.[A-Za-z0-9]{1,6}$', '', orig)
-
-    working = base_no_ext
-    if DEBUG:
-        logger.debug(f"extract_info: start raw='{orig}' base_no_ext='{base_no_ext}'")
-
-    # Normalize separators to spaces
-    working = re.sub(r'[_\.\-]+', ' ', working)
-
-    # 1) QUALITY (first)
+    # 1) Extract Quality first from full filename (including extension)
     quality_pattern = re.compile(r'(?i)\b(2160p|4k|1080p|720p|480p|360p|240p|144p|\d{3,4}p)\b')
-    q_match = quality_pattern.search(working)
+    q_match = quality_pattern.search(orig)
     quality = None
     if q_match:
-        q_raw = q_match.group(1)
-        q_low = q_raw.lower()
-        if q_low == "4k":
+        q_raw = q_match.group(1).lower()
+        if q_raw == "4k":
             quality = "2160p"
+        elif q_raw == "360p":
+            quality = "480p"  # only convert 360p to 480p
         else:
-            quality = q_low
-        if quality == "360p":
-            quality = "480p"
-        working = working[:q_match.start()] + ' ' + working[q_match.end():]
+            quality = q_raw
     else:
         quality = "480p"
 
-    # 2) SEASON & EPISODE
+    # 2) Extract Season & Episode from full filename (including extension)
     season_num: Optional[int] = None
     episode_num: Optional[int] = None
 
     combined_patterns = [
-        re.compile(r'(?i)\bS0*(\d{1,2})\s*[.\-_\s]*E0*(\d{1,3})\b'),
-        re.compile(r'(?i)\bS0*(\d{1,2})E0*(\d{1,3})\b'),
+        re.compile(r'(?i)S0*(\d{1,2})[ ._\-]*E0*(\d{1,3})'),  # S01E07 or S01 E07 or S01-E07
     ]
     for pat in combined_patterns:
-        m = pat.search(working)
+        m = pat.search(orig)
         if m:
             season_num = int(m.group(1))
             episode_num = int(m.group(2))
-            working = working[:m.start()] + ' ' + working[m.end():]
             break
 
     if season_num is None:
-        m = re.search(r'(?i)\bSeason[\s:.]*0*(\d{1,2})\b', working)
+        m = re.search(r'(?i)Season[ .:_-]*0*(\d{1,2})', orig)
         if m:
             season_num = int(m.group(1))
-            working = working[:m.start()] + ' ' + working[m.end():]
 
     if episode_num is None:
-        m = re.search(r'(?i)\b(?:Episode|Ep)[\s:.]*0*(\d{1,3})\b', working)
+        m = re.search(r'(?i)(?:Episode|Ep)[ .:_-]*0*(\d{1,3})', orig)
         if m:
             episode_num = int(m.group(1))
-            working = working[:m.start()] + ' ' + working[m.end():]
 
     if episode_num is None:
-        m = re.search(r'(?i)\bE0*(\d{1,3})\b', working)
+        m = re.search(r'(?i)E0*(\d{1,3})', orig)
         if m:
             episode_num = int(m.group(1))
-            working = working[:m.start()] + ' ' + working[m.end():]
 
     if season_num is None:
-        m = re.search(r'(?i)\bS0*(\d{1,2})\b', working)
+        m = re.search(r'(?i)S0*(\d{1,2})', orig)
         if m:
             season_num = int(m.group(1))
-            working = working[:m.start()] + ' ' + working[m.end():]
 
     if season_num is None:
         season_num = 1
@@ -148,28 +130,43 @@ def extract_info(raw_filename: str) -> Tuple[str, str, str, str]:
     sn = f"S{season_num:02d}"
     ep = f"{episode_num:02d}"
 
-    # 3) TITLE CLEANUP
-    t = working
+    # 3) For anime name, remove extension now (only last dot + ext)
+    base_no_ext = re.sub(r'\.[A-Za-z0-9]{1,6}$', '', orig)
 
-    # Remove bracketed groups e.g. [@CrunchyRollChannel] (Fansub)
-    t = re.sub(r'[\[\(]\s*[@A-Za-z0-9_\- .:;!#&\'"()]+\s*[\]\)]', ' ', t)
-    t = re.sub(r'[\[\]\(\)\{\}]', ' ', t)
+    # 4) Clean anime name by removing quality, season, episode info, tags, brackets etc.
+    working = base_no_ext
 
+    # Remove quality (already detected)
+    working = re.sub(r'(?i)\b(2160p|4k|1080p|720p|480p|360p|240p|144p|\d{3,4}p)\b', ' ', working)
+
+    # Remove season/episode patterns to clean title
+    working = re.sub(r'(?i)S0*\d{1,2}[ ._\-]*E0*\d{1,3}', ' ', working)
+    working = re.sub(r'(?i)Season[ .:_-]*0*\d{1,2}', ' ', working)
+    working = re.sub(r'(?i)(Episode|Ep)[ .:_-]*0*\d{1,3}', ' ', working)
+    working = re.sub(r'(?i)E0*\d{1,3}', ' ', working)
+    working = re.sub(r'(?i)S0*\d{1,2}', ' ', working)
+
+    # Remove bracketed groups e.g. [@CrunchyRollChannel], (Fansub)
+    working = re.sub(r'[\[\(][^\]\)]+[\]\)]', ' ', working)
+
+    # Remove common tags like HEVC, BluRay, Dual Audio etc.
     tags_pattern = re.compile(
         r'(?i)\b(HEVC|x265|x264|10bit|8bit|BluRay|BDRip|WEBRip|WEB[- ]?DL|WEBDL|HDTV|HDRip|DVDRip|Dual[\s-]*Audio|DualAudio|ESub|SUB|subs|subbed|AAC|AC3|remux|rip|brrip|dub|dubbed|proper|repack|extended)\b'
     )
-    t = tags_pattern.sub(' ', t)
+    working = tags_pattern.sub(' ', working)
 
     # Remove stray digits and bitrates
-    t = re.sub(r'\b\d{1,4}bit\b', ' ', t, flags=re.IGNORECASE)
-    t = re.sub(r'\b\d{3,4}\b', ' ', t)
+    working = re.sub(r'\b\d{1,4}bit\b', ' ', working, flags=re.IGNORECASE)
+    working = re.sub(r'\b\d{3,4}\b', ' ', working)
 
-    t = re.sub(r'[_\.\-]+', ' ', t)
-    t = re.sub(r'\s+', ' ', t).strip()
+    # Clean extra spaces and underscores/dashes
+    working = re.sub(r'[_\.\-]+', ' ', working)
+    working = re.sub(r'\s+', ' ', working).strip()
 
-    if not t:
-        t = base_no_ext
+    # Use cleaned working string as title candidate
+    t = working if working else base_no_ext
 
+    # Match closest anime name from saved list
     chosen_name = None
     if t and not re.fullmatch(r'\d+', t):
         best_ratio = 0.0
@@ -190,6 +187,7 @@ def extract_info(raw_filename: str) -> Tuple[str, str, str, str]:
                 except Exception:
                     logger.exception("Error saving new anime name")
     else:
+        # fallback to best match from full filename
         best_ratio = 0.0
         best_name = None
         for n in anime_names:
@@ -304,7 +302,7 @@ async def on_media(_, message: Message):
     if not raw_name:
         raw_name = getattr(media, "file_unique_id", "unknown_file")
 
-    # Use full filename including extension
+    # Use full filename including extension for extraction
     try:
         anime_name, sn, ep, quality = extract_info(raw_name)
     except Exception as e:
