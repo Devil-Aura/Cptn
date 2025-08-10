@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 # BOT CONFIG
 API_ID = 22768311
 API_HASH = "702d8884f48b42e865425391432b3794"
-BOT_TOKEN = ""  # Replace with your actual token
+BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"
 DATA_FILE = "anime_names.json"
 
 # Default Caption Template
@@ -62,76 +62,56 @@ def save_anime_names():
         logger.error(f"Error saving anime names: {e}")
 
 def parse_filename(filename):
-    """Improved filename parser that handles various formats"""
-    # Remove channel name if present
-    clean_name = re.sub(r'\[@?\w+\s*\w*\]', '', filename, flags=re.IGNORECASE)
+    """Advanced filename parser that handles complex patterns"""
+    if not filename:
+        return None
     
-    # Try multiple patterns to extract info
+    # Remove common tags and brackets
+    clean_name = re.sub(r'\[.*?\]|\(.*?\)|@\w+', '', filename)
+    
+    # Try multiple patterns in order of priority
     patterns = [
-        r"(?:.*?)(.+?)\s+(S\d+)(?:E|Ep|EP|_)(\d+).*?(\d{3,4})p",  # S01E01 1080p
-        r"(?:.*?)(.+?)\s+-\s+(\d+)\s+\((\d{3,4})p\)",              # Name - 01 (1080p)
-        r"(?:.*?)(.+?)\s+(\d+)\.(\d{3,4})p",                       # Name 01.1080p
-        r"(?:.*?)(.+?)\s+Episode\s+(\d+)\s+(\d{3,4})p"             # Name Episode 01 1080p
+        # Pattern 1: Standard SXXEXX with quality
+        r"(.*?)\s*(?:S|Season\s*)(\d+)(?:\s*E|Ep|Episode\s*)(\d+).*?(\d{3,4}(?:p|P))",
+        # Pattern 2: Episode XX with quality
+        r"(.*?)\s*(?:Ep|Episode\s*)(\d+).*?(\d{3,4}(?:p|P))",
+        # Pattern 3: Just quality at end
+        r"(.*?)\s*(\d{3,4}(?:p|P))\b"
     ]
     
     for pattern in patterns:
         match = re.search(pattern, clean_name, re.IGNORECASE)
         if match:
-            if len(match.groups()) == 4:
-                anime_name, season, episode, quality = match.groups()
-                season = season.upper()
-            else:
-                anime_name, episode, quality = match.groups()
+            groups = match.groups()
+            if len(groups) == 4:
+                anime_name, season, episode, quality = groups
+                season = f"S{int(season):02d}"
+            elif len(groups) == 3:
+                anime_name, episode, quality = groups
                 season = "S01"  # Default season
+            elif len(groups) == 2:
+                anime_name, quality = groups
+                season = "S01"
+                episode = "01"    # Default episode
             
-            # Clean quality (convert 360p to 480p and make 'p' lowercase)
+            # Clean extracted values
+            anime_name = re.sub(r'[_\-.]+', ' ', anime_name).strip()
+            episode = f"{int(episode):02d}" if episode else "01"
+            
+            # Process quality (convert 360p to 480p and lowercase p)
             quality = quality.lower()
             if quality == "360p":
                 quality = "480p"
-            else:
-                quality = f"{quality}p" if not quality.endswith("p") else quality
-            
-            # Clean anime name
-            anime_name = re.sub(r'[_\-.]+', ' ', anime_name).strip()
+            elif not quality.endswith("p"):
+                quality = f"{quality}p"
             
             return anime_name, season, episode, quality
     
     return None
 
 # ----- Command Handlers -----
-@app.on_message(filters.command("start") & filters.private)
-async def start_cmd(_, message: Message):
-    await message.reply_text(
-        "🤖 <b>Auto Caption Bot</b>\n\n"
-        "I automatically add captions to anime videos in channels.\n\n"
-        "Add me to your channel as admin with:\n"
-        "- Post Messages permission\n"
-        "- Delete Messages permission (optional)\n\n"
-        "Use /help for commands",
-        parse_mode=ParseMode.HTML
-    )
-
-@app.on_message(filters.command("help") & filters.private)
-async def help_cmd(_, message: Message):
-    help_text = """<b>Available Commands:</b>
-
-<b>Channel Commands:</b>
-/setcaption - Set custom caption template
-/showcaption - Show current caption
-
-<b>Anime Database:</b>
-/addanime - Add new anime title
-/deleteanime - Remove anime title
-/listanime - List all anime titles
-
-<b>Supported Filename Formats:</b>
-- AnimeName S01E01 1080p.mkv
-- [Group] Anime Name - 01 (720p).mp4
-- Anime.Name.Episode.01.480p.mkv
-- Anime Name Episode 01 360p.mp4"""
-    await message.reply_text(help_text, parse_mode=ParseMode.HTML)
-
-# ... [keep all other command handlers the same as previous version] ...
+# [Keep all your existing command handlers unchanged]
+# ...
 
 # ----- Channel Handlers -----
 @app.on_message(filters.channel & (filters.video | filters.document))
@@ -184,12 +164,12 @@ async def handle_media(_, message: Message):
         except Exception as e:
             logger.warning(f"Couldn't delete original: {e}")
         
-        logger.info(f"Processed {filename} successfully")
+        logger.info(f"Successfully processed: {filename}")
         
     except Exception as e:
         logger.error(f"Error processing media: {e}")
         try:
-            await message.reply_text(f"❌ Error processing file: {str(e)[:100]}")
+            await message.reply_text(f"❌ Error: {str(e)[:100]}")
         except:
             pass
 
