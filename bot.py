@@ -89,30 +89,32 @@ def extract_info(raw_filename: str) -> Tuple[str, str, str, str]:
     else:
         quality = '480p'
 
-    # 2) Extract season and episode
+    # 2) Extract season and episode - more comprehensive pattern matching
     season = None
     episode = None
 
-    m = re.search(r'(?i)S0*(\d{1,2})[ ._\-]*E0*(\d{1,3})', orig)
+    # Try SXXEXX pattern first
+    m = re.search(r'(?i)(?:s|season)[ ._\-]*0*(\d{1,2})[ ._\-]*(?:e|ep|episode)[ ._\-]*0*(\d{1,3})', orig)
     if m:
         season = int(m.group(1))
         episode = int(m.group(2))
     else:
-        m_season = re.search(r'(?i)Season[ .:_-]*0*(\d{1,2})', orig)
+        # Try separate season and episode patterns
+        m_season = re.search(r'(?i)(?:s|season)[ .:_-]*0*(\d{1,2})', orig)
         if m_season:
             season = int(m_season.group(1))
-        m_episode = re.search(r'(?i)(?:Episode|Ep)[ .:_-]*0*(\d{1,3})', orig)
+        
+        m_episode = re.search(r'(?i)(?:e|ep|episode)[ .:_-]*0*(\d{1,3})', orig)
         if m_episode:
             episode = int(m_episode.group(1))
+        
+        # Try XX pattern (just episode number)
         if episode is None:
-            m_e = re.search(r'(?i)E0*(\d{1,3})', orig)
+            m_e = re.search(r'(?i)(?:^|[ ._\-])(\d{1,3})(?:$|[ ._\-])', orig)
             if m_e:
                 episode = int(m_e.group(1))
-        if season is None:
-            m_s = re.search(r'(?i)S0*(\d{1,2})', orig)
-            if m_s:
-                season = int(m_s.group(1))
 
+    # Default to season 1 and episode 1 if not found
     if season is None:
         season = 1
     if episode is None:
@@ -126,18 +128,22 @@ def extract_info(raw_filename: str) -> Tuple[str, str, str, str]:
 
     # 4) Clean anime title: remove quality, season, episode, tags, brackets
     clean = base_no_ext
+    # Remove quality indicators
     clean = re.sub(r'(?i)\b(2160p|4k|1080p|720p|480p|360p|240p|144p|\d{3,4}p)\b', ' ', clean)
-    clean = re.sub(r'(?i)S0*\d{1,2}[ ._\-]*E0*\d{1,3}', ' ', clean)
-    clean = re.sub(r'(?i)Season[ .:_-]*0*\d{1,2}', ' ', clean)
-    clean = re.sub(r'(?i)(Episode|Ep)[ .:_-]*0*\d{1,3}', ' ', clean)
-    clean = re.sub(r'(?i)E0*\d{1,3}', ' ', clean)
-    clean = re.sub(r'(?i)S0*\d{1,2}', ' ', clean)
-    clean = re.sub(r'[\[\(][^\]\)]+[\]\)]', ' ', clean)  # Remove bracketed tags
+    # Remove season/episode patterns
+    clean = re.sub(r'(?i)(?:s|season)[ ._\-]*0*\d{1,2}[ ._\-]*(?:e|ep|episode)[ ._\-]*0*\d{1,3}', ' ', clean)
+    clean = re.sub(r'(?i)(?:s|season)[ .:_-]*0*\d{1,2}', ' ', clean)
+    clean = re.sub(r'(?i)(?:e|ep|episode)[ .:_-]*0*\d{1,3}', ' ', clean)
+    clean = re.sub(r'(?i)(?:^|[ ._\-])\d{1,3}(?:$|[ ._\-])', ' ', clean)  # Standalone numbers
+    # Remove bracketed tags
+    clean = re.sub(r'[\[\(][^\]\)]+[\]\)]', ' ', clean)
+    # Remove common video tags
     clean = re.sub(
         r'(?i)\b(HEVC|x265|x264|10bit|8bit|BluRay|BDRip|WEBRip|WEB[- ]?DL|WEBDL|HDTV|HDRip|DVDRip|Dual[\s-]*Audio|DualAudio|ESub|SUB|subs|subbed|AAC|AC3|remux|rip|brrip|dub|dubbed|proper|repack|extended)\b',
         ' ', clean)
     clean = re.sub(r'\b\d{1,4}bit\b', ' ', clean, flags=re.I)
     clean = re.sub(r'\b\d{3,4}\b', ' ', clean)
+    # Clean up separators and spaces
     clean = re.sub(r'[_\.\-]+', ' ', clean)
     clean = re.sub(r'\s+', ' ', clean).strip()
 
