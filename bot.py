@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 # ===== Configuration =====
 class Config:
-    BOT_TOKEN = ""  # From @BotFather
+    BOT_TOKEN = "YOUR_BOT_TOKEN"
     DEFAULT_LANGUAGE = "Hindi #Official"
     MAL_CLIENT_ID = "2683e006d6116b8611c50c1dbe20a1a1"
     MAX_RETRIES = 3
@@ -80,8 +80,16 @@ class FilenameParser:
                       re.search(r'(\d+)x(\d+)', clean_name) or \
                       re.search(r'Episode\s*(\d+)', clean_name, re.I)
             
-            season = ep_match.group(1) if ep_match and len(ep_match.groups()) > 1 else "01"
-            episode = ep_match.group(2) if ep_match and len(ep_match.groups()) > 1 else (ep_match.group(1) if ep_match else "01"
+            if ep_match:
+                if len(ep_match.groups()) > 1:
+                    season = ep_match.group(1)
+                    episode = ep_match.group(2)
+                else:
+                    season = "01"
+                    episode = ep_match.group(1)
+            else:
+                season = "01"
+                episode = "01"
             
             anime_name = clean_name[:ep_match.start()].strip() if ep_match else clean_name
             anime_name = re.sub(r'\b(480p|720p|1080p|HD)\b', '', anime_name, flags=re.I).strip()
