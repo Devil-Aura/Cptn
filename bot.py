@@ -13,7 +13,7 @@ from pyrogram.enums import ParseMode
 
 # -------- CONFIG --------
 API_ID = int(os.environ.get("API_ID", "22768311"))
-API_HASH = os.environ.get("API_HASH", "702d8884f48b42e865425391432b3794")
+API_HASH = os.environ.get("API_HASH", "702d8884f48b42e865425391432b3794"))
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 DATA_FILE = "anime_names.json"
 DEBUG = os.environ.get("DEBUG", "0") == "1"
@@ -75,81 +75,60 @@ def extract_info(raw_filename: str) -> Tuple[str, str, str, str]:
 
     orig = raw_filename.strip()
 
-    # 1) Extract Quality (full original filename)
-    quality_match = re.search(
-        r'(?i)\b(2160p|4k|1080p|720p|480p|360p|240p|144p|\d{3,4}p)\b', orig)
-    if quality_match:
-        q = quality_match.group(1).lower()
-        if q == '4k':
-            quality = '2160p'
-        elif q == '360p':
-            quality = '480p'  # only convert 360p -> 480p
-        else:
-            quality = q
-    else:
-        quality = '480p'
-
-    # 2) Extract season and episode - more comprehensive pattern matching
-    season = None
-    episode = None
-
-    # Try SXXEXX pattern first
-    m = re.search(r'(?i)(?:s|season)[ ._\-]*0*(\d{1,2})[ ._\-]*(?:e|ep|episode)[ ._\-]*0*(\d{1,3})', orig)
+    # 1) First extract season and episode with high precision
+    season = 1
+    episode = 1
+    
+    # Priority 1: SXXEXX pattern (most reliable)
+    m = re.search(r'(?i)S(\d{1,2})E(\d{1,3})', orig)
     if m:
         season = int(m.group(1))
         episode = int(m.group(2))
     else:
-        # Try separate season and episode patterns
-        m_season = re.search(r'(?i)(?:s|season)[ .:_-]*0*(\d{1,2})', orig)
-        if m_season:
-            season = int(m_season.group(1))
-        
-        m_episode = re.search(r'(?i)(?:e|ep|episode)[ .:_-]*0*(\d{1,3})', orig)
-        if m_episode:
-            episode = int(m_episode.group(1))
-        
-        # Try XX pattern (just episode number)
-        if episode is None:
-            m_e = re.search(r'(?i)(?:^|[ ._\-])(\d{1,3})(?:$|[ ._\-])', orig)
-            if m_e:
-                episode = int(m_e.group(1))
-
-    # Default to season 1 and episode 1 if not found
-    if season is None:
-        season = 1
-    if episode is None:
-        episode = 1
+        # Priority 2: Separate SXX and EXX patterns
+        m_s = re.search(r'(?i)S(\d{1,2})\b', orig)
+        if m_s:
+            season = int(m_s.group(1))
+        m_e = re.search(r'(?i)E(\d{1,3})\b', orig)
+        if m_e:
+            episode = int(m_e.group(1))
+        else:
+            # Priority 3: Episode in brackets like [07]
+            m_ep = re.search(r'\[(\d{1,3})\]', orig)
+            if m_ep:
+                episode = int(m_ep.group(1))
 
     sn = f"S{season:02d}"
     ep = f"{episode:02d}"
 
-    # 3) Remove extension now to clean title
-    base_no_ext = re.sub(r'\.[^.]+$', '', orig)
+    # 2) Extract Quality with priority to higher quality indicators
+    quality = '480p'  # default
+    quality_match = re.search(r'(?i)(2160p|4k|1080p|720p|480p|360p)', orig)
+    if quality_match:
+        q = quality_match.group(1).lower()
+        if q == '4k':
+            quality = '2160p'
+        elif q == '720p':
+            quality = '720p'  # keep original quality
+        else:
+            quality = q
 
-    # 4) Clean anime title: remove quality, season, episode, tags, brackets
-    clean = base_no_ext
-    # Remove quality indicators
-    clean = re.sub(r'(?i)\b(2160p|4k|1080p|720p|480p|360p|240p|144p|\d{3,4}p)\b', ' ', clean)
-    # Remove season/episode patterns
-    clean = re.sub(r'(?i)(?:s|season)[ ._\-]*0*\d{1,2}[ ._\-]*(?:e|ep|episode)[ ._\-]*0*\d{1,3}', ' ', clean)
-    clean = re.sub(r'(?i)(?:s|season)[ .:_-]*0*\d{1,2}', ' ', clean)
-    clean = re.sub(r'(?i)(?:e|ep|episode)[ .:_-]*0*\d{1,3}', ' ', clean)
-    clean = re.sub(r'(?i)(?:^|[ ._\-])\d{1,3}(?:$|[ ._\-])', ' ', clean)  # Standalone numbers
-    # Remove bracketed tags
-    clean = re.sub(r'[\[\(][^\]\)]+[\]\)]', ' ', clean)
-    # Remove common video tags
-    clean = re.sub(
-        r'(?i)\b(HEVC|x265|x264|10bit|8bit|BluRay|BDRip|WEBRip|WEB[- ]?DL|WEBDL|HDTV|HDRip|DVDRip|Dual[\s-]*Audio|DualAudio|ESub|SUB|subs|subbed|AAC|AC3|remux|rip|brrip|dub|dubbed|proper|repack|extended)\b',
-        ' ', clean)
-    clean = re.sub(r'\b\d{1,4}bit\b', ' ', clean, flags=re.I)
-    clean = re.sub(r'\b\d{3,4}\b', ' ', clean)
-    # Clean up separators and spaces
-    clean = re.sub(r'[_\.\-]+', ' ', clean)
-    clean = re.sub(r'\s+', ' ', clean).strip()
+    # 3) Clean anime title
+    clean = re.sub(r'\.[^.]+$', '', orig)  # Remove extension
+    # Remove common patterns
+    clean = re.sub(r'(?i)\[@CrunchyRollChannel\]', '', clean)
+    clean = re.sub(r'(?i)\b(2160p|4k|1080p|720p|480p|360p)\b', '', clean)
+    clean = re.sub(r'(?i)\b(HEVC|10bit|BluRay|Dual Audio|ESub)\b', '', clean)
+    clean = re.sub(r'(?i)S\d{1,2}E\d{1,3}', '', clean)  # Remove SXXEXX
+    clean = re.sub(r'(?i)S\d{1,2}', '', clean)  # Remove SXX
+    clean = re.sub(r'(?i)E\d{1,3}', '', clean)  # Remove EXX
+    clean = re.sub(r'\[.*?\]', '', clean)  # Remove anything in brackets
+    clean = re.sub(r'[_\-.]+', ' ', clean)  # Replace separators with space
+    clean = re.sub(r'\s+', ' ', clean).strip()  # Remove extra spaces
 
-    anime_title_candidate = clean if clean else base_no_ext
+    anime_title_candidate = clean
 
-    # 5) Find closest anime name from saved list or use candidate and add if new
+    # 4) Find closest anime name from saved list
     best_ratio = 0.0
     best_name = None
     for n in anime_names:
@@ -160,20 +139,18 @@ def extract_info(raw_filename: str) -> Tuple[str, str, str, str]:
 
     chosen_name = best_name if best_ratio >= 0.6 else anime_title_candidate
 
-    # Optional: add new anime name to list
+    # Add new anime name to list if not exists
     if chosen_name not in anime_names:
         anime_names.append(chosen_name)
         save_anime_names(anime_names)
 
-    global last_parsed
     last_parsed = {
         "raw": orig,
-        "base_no_ext": base_no_ext,
-        "detected_quality": quality,
+        "clean": clean,
+        "quality": quality,
         "season": sn,
         "episode": ep,
-        "title_candidate": anime_title_candidate,
-        "chosen_name": chosen_name
+        "title": chosen_name
     }
 
     if DEBUG:
@@ -258,7 +235,7 @@ async def on_media(client, message: Message):
     if not media or not media.file_name:
         return
 
-    full_filename = media.file_name  # Use full original filename!
+    full_filename = media.file_name
 
     try:
         anime_name, sn, ep, quality = extract_info(full_filename)
