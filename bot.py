@@ -4,6 +4,7 @@ import re
 import json
 import logging
 from html import escape
+from difflib import SequenceMatcher
 from typing import Tuple
 
 from pyrogram import Client, filters
@@ -37,141 +38,214 @@ anime_names = []
 last_parsed = None
 channel_captions = {}
 
-def load_anime_names():
+# ---------- DB LOAD / SAVE ----------
+def load_anime_names() -> list:
     if not os.path.exists(DATA_FILE):
         return []
     try:
         with open(DATA_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
+            if isinstance(data, list):
+                logger.info(f"Loaded {len(data)} anime names")
+                return data
     except Exception:
-        logger.exception("Failed to load anime names")
-        return []
+        logger.exception("Failed to load anime names file")
+    return []
 
-def save_anime_names(names):
+def save_anime_names(names: list):
     try:
-        with open(DATA_FILE, "w", encoding="utf-8") as f:
+        tmp = DATA_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(names, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, DATA_FILE)
+        logger.debug(f"Saved {len(names)} anime names")
     except Exception:
         logger.exception("Failed to save anime names")
 
 anime_names = load_anime_names()
 
-def extract_info(filename: str) -> Tuple[str, str, str, str]:
-    global last_parsed
-    
-    # Remove extension
-    clean_name = re.sub(r'\.[^.]+$', '', filename)
-    
-    # Extract quality first (most reliable pattern)
-    quality = "480p"
-    quality_match = re.search(r'(?i)(2160p|4k|1080p|720p|480p|360p)', clean_name)
-    if quality_match:
-        q = quality_match.group(1).lower()
-        quality = "2160p" if q == "4k" else q
-        quality = "480p" if q == "360p" else quality
-    
-    # Extract season and episode
-    season = "01"
-    episode = "01"
-    
-    # Try SXXEXX pattern first
-    ep_match = re.search(r'(?i)S(\d{1,2})E(\d{1,3})', clean_name)
-    if ep_match:
-        season = ep_match.group(1).zfill(2)
-        episode = ep_match.group(2).zfill(2)
-    else:
-        # Try separate SXX and EXX patterns
-        s_match = re.search(r'(?i)S(\d{1,2})', clean_name)
-        if s_match:
-            season = s_match.group(1).zfill(2)
-        
-        e_match = re.search(r'(?i)E(\d{1,3})', clean_name)
-        if e_match:
-            episode = e_match.group(1).zfill(2)
+# ---------- UTILS ----------
+def similar(a: str, b: str) -> float:
+    return SequenceMatcher(None, a.lower(), b.lower()).ratio()
+
+def extract_info(raw_filename: str) -> Tuple[str, str, str, str]:
+    global anime_names, last_parsed
+
+    orig = raw_filename.strip()
+
+    # More flexible regex:
+    # Captures: Anime Name, Season (optional), Episode (optional), Quality (optional)
+    match = re.search(
+        r"(?:\[.*?\]\s*)?(.+?)(?:[\s._-]+S?(\d{1,2}))?(?:[ ._-]*E?(\d{1,3}))?.*?(2160p|4k|1080p|720p|480p|360p)?",
+        orig,
+        re.IGNORECASE
+    )
+
+    if match:
+        anime_raw, season_num, ep_num, quality = match.groups()
+
+        # Normalize season
+        if not season_num or season_num == "0":
+            season_num = "1"
+        season_num = f"S{int(season_num):02d}"
+
+        # Normalize episode
+        if not ep_num:
+            ep_num = "??"  # Unknown episode instead of forcing 01
         else:
-            # Try standalone episode number
-            e_match = re.search(r'(?i)(?:^|[ ._-])(\d{1,3})(?:$|[ ._-])', clean_name)
-            if e_match:
-                episode = e_match.group(1).zfill(2)
-    
-    # Extract anime name by removing all metadata
-    anime_name = clean_name
-    patterns_to_remove = [
-        r'(?i)\[@CrunchyRollChannel\]',
-        r'(?i)S\d{1,2}E\d{1,3}',
-        r'(?i)S\d{1,2}',
-        r'(?i)E\d{1,3}',
-        r'(?i)\d{1,3}(?:$|[ ._-])',
-        r'(?i)(2160p|4k|1080p|720p|480p|360p)',
-        r'(?i)(HEVC|x265|x264|10bit|8bit|BluRay|BDRip|WEBRip|WEB[- ]?DL|WEBDL|HDTV|HDRip|DVDRip)',
-        r'(?i)(Dual[\s-]*Audio|DualAudio|ESub|SUB|subs|subbed|AAC|AC3|remux|rip|brrip|dub|dubbed|proper|repack|extended)',
-        r'\[.*?\]',
-        r'\(.*?\)',
-        r'[_.-]{2,}',
-    ]
-    
-    for pattern in patterns_to_remove:
-        anime_name = re.sub(pattern, ' ', anime_name)
-    
-    anime_name = re.sub(r'\s+', ' ', anime_name).strip()
-    
-    # Store parsed data for debugging
-    last_parsed = {
-        "filename": filename,
-        "anime_name": anime_name,
-        "season": season,
-        "episode": episode,
-        "quality": quality
-    }
-    
-    return anime_name, f"S{season}", episode, quality
+            ep_num = f"{int(ep_num):02d}"
 
-@app.on_message(filters.command("start"))
-async def start_cmd(client, message):
-    await message.reply_text("I'm an auto-caption bot for anime files")
+        # Normalize quality
+        quality = (quality or "480p").lower()
+        quality = "2160p" if quality == "4k" else quality
+        quality = quality.replace("360p", "480p")
 
-@app.on_message(filters.command("debuglast"))
-async def debug_last(client, message):
-    if last_parsed:
-        await message.reply_text(f"<pre>{escape(str(last_parsed))}</pre>", parse_mode=ParseMode.HTML)
-    else:
-        await message.reply_text("No file parsed yet")
+        # Clean anime name
+        clean = re.sub(r'[_\-.]+', ' ', anime_raw).strip()
 
+        # Match closest saved anime name
+        best_ratio, best_name = 0.0, None
+        for n in anime_names:
+            ratio = similar(clean, n)
+            if ratio > best_ratio:
+                best_ratio, best_name = ratio, n
+
+        chosen_name = best_name if best_ratio >= 0.6 else clean
+
+        if chosen_name not in anime_names:
+            anime_names.append(chosen_name)
+            save_anime_names(anime_names)
+
+        last_parsed = {
+            "filename": orig,
+            "anime_name": chosen_name,
+            "season": season_num,
+            "episode": ep_num,
+            "quality": quality
+        }
+
+        return chosen_name, season_num, ep_num, quality
+
+    # Fallback if regex completely fails
+    return "Unknown Anime", "S01", "??", "480p"
+
+# ---------- COMMANDS ----------
+@app.on_message(filters.command("start") & ~filters.me)
+async def cmd_start(client, message: Message):
+    await message.reply_text(
+        "**👋 Welcome to Auto Caption Bot**\n\n"
+        "Send anime video/audio/document files, I'll repost with captions automatically.\n\n"
+        "Commands:\n"
+        "/addanime <name> - Add anime name manually\n"
+        "/delanime <name> - Delete anime name\n"
+        "/listanime - List saved anime names\n"
+        "/debuglast - Show last file parsing debug info\n"
+        "/help - Show this help"
+    )
+
+@app.on_message(filters.command("help") & ~filters.me)
+async def cmd_help(client, message: Message):
+    await message.reply_text(
+        "How I work:\n"
+        "1) Extract QUALITY first (only 360p → 480p conversion).\n"
+        "2) Extract SEASON & EPISODE (handles missing ones).\n"
+        "3) Clean and learn ANIME NAME.\n\n"
+        "Make me admin with Delete Messages permission to remove originals."
+    )
+
+@app.on_message(filters.command("addanime") & ~filters.me)
+async def cmd_addanime(client, message: Message):
+    try:
+        name = message.text.split(None, 1)[1].strip()
+    except IndexError:
+        return await message.reply_text("Usage: /addanime <Anime Name>")
+    if not name:
+        return await message.reply_text("Anime name cannot be empty.")
+    if name in anime_names:
+        return await message.reply_text("Anime name already exists.")
+    anime_names.append(name)
+    save_anime_names(anime_names)
+    await message.reply_text(f"✅ Added: {escape(name)}")
+
+@app.on_message(filters.command("delanime") & ~filters.me)
+async def cmd_delanime(client, message: Message):
+    try:
+        name = message.text.split(None, 1)[1].strip()
+    except IndexError:
+        return await message.reply_text("Usage: /delanime <Anime Name>")
+    try:
+        anime_names.remove(name)
+        save_anime_names(anime_names)
+        await message.reply_text(f"🗑 Deleted: {escape(name)}")
+    except ValueError:
+        await message.reply_text("Anime name not found in list.")
+
+@app.on_message(filters.command("listanime") & ~filters.me)
+async def cmd_listanime(client, message: Message):
+    if not anime_names:
+        return await message.reply_text("No saved anime names.")
+    txt = "📚 Saved Anime Names:\n" + "\n".join(f"• {escape(n)}" for n in anime_names)
+    await message.reply_text(txt)
+
+@app.on_message(filters.command("debuglast") & ~filters.me)
+async def cmd_debuglast(client, message: Message):
+    global last_parsed
+    if not last_parsed:
+        return await message.reply_text("No file parsed yet.")
+    await message.reply_text(f"<pre>{escape(json.dumps(last_parsed, indent=2, ensure_ascii=False))}</pre>", parse_mode=ParseMode.HTML)
+
+@app.on_message(filters.command("setcaption") & filters.channel)
+async def set_caption(_, message: Message):
+    if len(message.command) < 2:
+        return await message.reply_text("Usage: /setcaption Your_Custom_Caption_With_Placeholders")
+    custom_caption = message.text.split(" ", 1)[1]
+    channel_captions[message.chat.id] = custom_caption
+    await message.reply_text("✅ Custom caption set successfully!")
+
+@app.on_message(filters.command("showcaption") & filters.channel)
+async def show_caption(_, message: Message):
+    current_caption = channel_captions.get(message.chat.id, DEFAULT_CAPTION)
+    await message.reply_text(f"**Current Caption Template:**\n\n{current_caption}")
+
+# ---------- MEDIA HANDLER ----------
 @app.on_message((filters.document | filters.video | filters.audio) & ~filters.me)
-async def handle_media(client, message):
+async def on_media(client, message: Message):
     media = message.document or message.video or message.audio
     if not media or not media.file_name:
         return
-    
+
+    full_filename = media.file_name
+
     try:
-        anime_name, sn, ep, quality = extract_info(media.file_name)
-        
-        # Get custom caption or use default
-        caption = channel_captions.get(message.chat.id, DEFAULT_CAPTION)
-        formatted_caption = caption.format(
-            AnimeName=escape(anime_name),
-            Sn=sn,
-            Ep=ep,
-            Quality=quality
-        )
-        
-        # Resend with caption
-        await message.copy(
+        anime_name, sn, ep, quality = extract_info(full_filename)
+    except Exception as e:
+        logger.exception("extract_info error: %s", e)
+        anime_name, sn, ep, quality = "Unknown Anime", "S01", "??", "480p"
+
+    caption_template = channel_captions.get(message.chat.id, DEFAULT_CAPTION)
+    caption = caption_template.format(
+        AnimeName=escape(anime_name),
+        Sn=sn,
+        Ep=ep,
+        Quality=quality
+    )
+
+    try:
+        new_msg = await message.copy(
             chat_id=message.chat.id,
-            caption=formatted_caption,
+            caption=caption,
             parse_mode=ParseMode.HTML
         )
-        
-        # Delete original if possible
-        try:
-            await message.delete()
-        except Exception as e:
-            logger.warning(f"Couldn't delete original: {e}")
-            
     except Exception as e:
-        logger.error(f"Error processing media: {e}")
-        await message.reply_text(f"Error processing file: {e}")
+        logger.error(f"Failed to copy message with caption: {e}")
+        return
 
+    try:
+        await message.delete()
+    except Exception as e:
+        logger.warning(f"Failed to delete original message: {e}")
+
+# ---------- START BOT ----------
 if __name__ == "__main__":
-    logger.info("Starting bot...")
+    logger.info("Starting Auto Caption Bot...")
     app.run()
