@@ -13,7 +13,7 @@ from pyrogram.enums import ParseMode
 
 # -------- CONFIG --------
 API_ID = int(os.environ.get("API_ID", "22768311"))
-API_HASH = os.environ.get("API_HASH", "702d8884f48b42e865425391432b3794"))
+API_HASH = os.environ.get("API_HASH", "702d8884f48b42e865425391432b3794")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 DATA_FILE = "anime_names.json"
 DEBUG = os.environ.get("DEBUG", "0") == "1"
