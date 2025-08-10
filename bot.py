@@ -3,7 +3,7 @@ import logging
 import requests
 from functools import lru_cache
 from telegram import Update
-from telegram.ext import Application, MessageHandler, filters, ContextTypes
+from telegram.ext import Updater, MessageHandler, Filters, CallbackContext
 
 # Configure logging
 logging.basicConfig(
@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 # ===== Configuration =====
 class Config:
-    BOT_TOKEN = "YOUR_BOT_TOKEN"
+    BOT_TOKEN = "YOUR_BOT_TOKEN"  # Replace with your bot token
     DEFAULT_LANGUAGE = "Hindi #Official"
     MAL_CLIENT_ID = "2683e006d6116b8611c50c1dbe20a1a1"
     MAX_RETRIES = 3
@@ -113,7 +113,7 @@ def generate_caption(metadata, channel_username):
 <b>📡 Powered by : {channel_username}</b>"""
 
 # ===== Handler =====
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def handle_message(update: Update, context: CallbackContext):
     try:
         message = update.channel_post
         if not message:
@@ -147,16 +147,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         caption = generate_caption(metadata, channel_username)
         
         # Delete and repost
-        await message.delete()
+        context.bot.delete_message(
+            chat_id=message.chat.id,
+            message_id=message.message_id
+        )
+        
         if message.video:
-            await context.bot.send_video(
+            context.bot.send_video(
                 chat_id=message.chat.id,
                 video=media.file_id,
                 caption=caption,
                 parse_mode='HTML'
             )
         else:
-            await context.bot.send_document(
+            context.bot.send_document(
                 chat_id=message.chat.id,
                 document=media.file_id,
                 caption=caption,
@@ -170,16 +174,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ===== Main =====
 def main():
-    application = Application.builder().token(Config.BOT_TOKEN).build()
+    updater = Updater(Config.BOT_TOKEN, use_context=True)
+    dp = updater.dispatcher
     
     # Handle videos/documents in any channel
-    application.add_handler(MessageHandler(
-        filters.ChatType.CHANNEL & (filters.VIDEO | filters.Document.ALL),
+    dp.add_handler(MessageHandler(
+        Filters.chat_type.channel & (Filters.video | Filters.document),
         handle_message
     ))
     
-    application.run_polling()
+    updater.start_polling()
     logger.info("Bot is ready for all channels!")
+    updater.idle()
 
 if __name__ == '__main__':
     main()
