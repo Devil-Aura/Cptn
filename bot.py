@@ -1,9 +1,9 @@
 import re
 import logging
-import requests
-from functools import lru_cache
 from telegram import Update
 from telegram.ext import Updater, MessageHandler, Filters, CallbackContext
+import requests
+from functools import lru_cache
 
 # Configure logging
 logging.basicConfig(
@@ -12,107 +12,76 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ===== Configuration =====
-class Config:
-    BOT_TOKEN = "YOUR_BOT_TOKEN"  # Replace with your bot token
-    DEFAULT_LANGUAGE = "Hindi #Official"
-    MAL_CLIENT_ID = "2683e006d6116b8611c50c1dbe20a1a1"
-    MAX_RETRIES = 3
-    CACHE_SIZE = 100
+# Configuration
+BOT_TOKEN = ""
+DEFAULT_LANGUAGE = "Hindi #Official"  # Changed to English
+CHANNEL_USERNAME = "@CrunchyRollChannel"  # Fixed channel username
 
-# ===== Services =====
-class MALService:
-    BASE_URL = "https://api.myanimelist.net/v2"
-    
-    @classmethod
-    @lru_cache(maxsize=Config.CACHE_SIZE)
-    def get_anime_info(cls, query):
-        try:
-            response = requests.get(
-                f"{cls.BASE_URL}/anime",
-                headers={'X-MAL-CLIENT-ID': Config.MAL_CLIENT_ID},
-                params={'q': query, 'limit': 1, 'fields': 'title'},
-                timeout=10
-            )
-            data = response.json()
-            if data.get('data'):
-                return data['data'][0]['node']['title']
-            return query
-        except Exception as e:
-            logger.error(f"MAL API Error: {e}")
-            return query
+@lru_cache(maxsize=100)
+def get_anime_name(query):
+    try:
+        response = requests.get(
+            "https://api.jikan.moe/v4/anime",
+            params={'q': query, 'limit': 1},
+            timeout=5
+        )
+        data = response.json()
+        if data.get('data'):
+            return data['data'][0]['title']
+        return query
+    except Exception:
+        return query
 
-class JikanService:
-    BASE_URL = "https://api.jikan.moe/v4"
-    
-    @classmethod
-    @lru_cache(maxsize=Config.CACHE_SIZE)
-    def get_anime_info(cls, query):
-        try:
-            response = requests.get(
-                f"{cls.BASE_URL}/anime",
-                params={'q': query, 'limit': 1},
-                timeout=10
-            )
-            data = response.json()
-            if data.get('data'):
-                return data['data'][0]['title']
-            return query
-        except Exception as e:
-            logger.error(f"Jikan Error: {e}")
-            return query
-
-# ===== Parser =====
-class FilenameParser:
-    @staticmethod
-    def parse(filename):
-        try:
-            clean_name = re.sub(r'\.[^.]*$', '', filename)
-            clean_name = re.sub(r'\[@\w+\]', '', clean_name)
-            clean_name = re.sub(r'[_\[\]()]', ' ', clean_name).strip()
-            
-            # Extract quality
-            quality = re.search(r'(\d{3,4}p|HD|WEB-DL)', clean_name, re.I)
-            quality = quality.group(1) if quality else "Unknown"
-            
-            # Extract episode info
-            ep_match = re.search(r'S(\d+)E(\d+)', clean_name, re.I) or \
-                      re.search(r'(\d+)x(\d+)', clean_name) or \
-                      re.search(r'Episode\s*(\d+)', clean_name, re.I)
-            
-            if ep_match:
-                if len(ep_match.groups()) > 1:
-                    season = ep_match.group(1)
-                    episode = ep_match.group(2)
-                else:
-                    season = "01"
-                    episode = ep_match.group(1)
+def parse_filename(filename):
+    try:
+        # Clean filename
+        clean_name = re.sub(r'\.[^.]*$', '', filename)  # Remove extension
+        clean_name = re.sub(r'\[@\w+\]', '', clean_name)  # Remove [@channel]
+        clean_name = re.sub(r'[_\[\]]', ' ', clean_name).strip()  # Clean special chars
+        
+        # Extract quality (improved pattern)
+        quality_match = re.search(r'(\d{3,4}p|HD|FHD|WEB[- ]?DL|BluRay|HEVC|10bit)', clean_name, re.I)
+        quality = quality_match.group(1) if quality_match else "Unknown"
+        
+        # Extract season and episode (improved pattern)
+        ep_match = re.search(r'S(\d+)E(\d+)', clean_name, re.I) or \
+                  re.search(r'(\d+)x(\d+)', clean_name) or \
+                  re.search(r'Episode\s*(\d+)', clean_name, re.I) or \
+                  re.search(r'\bS(\d+)\b.*?\bE(\d+)\b', clean_name, re.I)
+        
+        if ep_match:
+            if len(ep_match.groups()) > 1:
+                season = ep_match.group(1)
+                episode = ep_match.group(2)
             else:
                 season = "01"
-                episode = "01"
-            
-            anime_name = clean_name[:ep_match.start()].strip() if ep_match else clean_name
-            anime_name = re.sub(r'\b(480p|720p|1080p|HD)\b', '', anime_name, flags=re.I).strip()
-            
-            return {
-                'anime_name': anime_name,
-                'season': season.zfill(2),
-                'episode': episode.zfill(2),
-                'quality': quality
-            }
-        except Exception as e:
-            logger.error(f"Parse error: {e}")
-            return None
+                episode = ep_match.group(1)
+        else:
+            season = "01"
+            episode = "01"
+        
+        # Extract anime name (everything before season/episode)
+        anime_name = clean_name[:ep_match.start()].strip() if ep_match else clean_name
+        anime_name = re.sub(r'\b(480p|720p|1080p|HD|FHD|WEB-DL|BluRay)\b', '', anime_name, flags=re.I).strip()
+        
+        return {
+            'anime_name': anime_name,
+            'season': season.zfill(2),
+            'episode': episode.zfill(2),
+            'quality': quality
+        }
+    except Exception as e:
+        logger.error(f"Parse error: {e}")
+        return None
 
-# ===== Caption Generator =====
-def generate_caption(metadata, channel_username):
+def generate_caption(metadata):
     return f"""<b>➥ {metadata['anime_name']} [S{metadata['season']}]</b>
 <b>🎬 Episode - {metadata['episode']}</b>
-<b>🎧 Language - {Config.DEFAULT_LANGUAGE}</b>
+<b>🎧 Language - {DEFAULT_LANGUAGE}</b>
 <b>🔎 Quality : {metadata['quality']}</b>
-<b>📡 Powered by : {channel_username}</b>"""
+<b>📡 Powered by : 
+{CHANNEL_USERNAME}</b>"""
 
-# ===== Handler =====
 def handle_message(update: Update, context: CallbackContext):
     try:
         message = update.channel_post
@@ -123,30 +92,21 @@ def handle_message(update: Update, context: CallbackContext):
         if not media or not media.file_name:
             return
 
-        logger.info(f"Processing in {message.chat.title}: {media.file_name}")
-        
-        # Get channel username
-        channel_username = f"@{message.chat.username}" if message.chat.username else message.chat.title
+        logger.info(f"Processing: {media.file_name}")
         
         # Parse metadata
-        metadata = FilenameParser.parse(media.file_name)
+        metadata = parse_filename(media.file_name)
         if not metadata:
             return
             
-        # Get anime name
-        for attempt in range(Config.MAX_RETRIES):
-            try:
-                metadata['anime_name'] = MALService.get_anime_info(metadata['anime_name']) or \
-                                      JikanService.get_anime_info(metadata['anime_name'])
-                break
-            except Exception as e:
-                if attempt == Config.MAX_RETRIES - 1:
-                    logger.error(f"Name lookup failed: {e}")
+        # Get the original English name from filename (no API call)
+        # If you want to use Jikan API, uncomment next line:
+        # metadata['anime_name'] = get_anime_name(metadata['anime_name']) or metadata['anime_name']
         
         # Generate caption
-        caption = generate_caption(metadata, channel_username)
+        caption = generate_caption(metadata)
         
-        # Delete and repost
+        # Delete and repost quickly
         context.bot.delete_message(
             chat_id=message.chat.id,
             message_id=message.message_id
@@ -167,24 +127,22 @@ def handle_message(update: Update, context: CallbackContext):
                 parse_mode='HTML'
             )
             
-        logger.info(f"Reposted in {message.chat.title}")
+        logger.info("Media reposted with caption")
         
     except Exception as e:
         logger.error(f"Error: {e}")
 
-# ===== Main =====
 def main():
-    updater = Updater(Config.BOT_TOKEN, use_context=True)
+    updater = Updater(BOT_TOKEN, use_context=True)
     dp = updater.dispatcher
     
-    # Handle videos/documents in any channel
     dp.add_handler(MessageHandler(
         Filters.chat_type.channel & (Filters.video | Filters.document),
         handle_message
     ))
     
     updater.start_polling()
-    logger.info("Bot is ready for all channels!")
+    logger.info("Bot is ready!")
     updater.idle()
 
 if __name__ == '__main__':
