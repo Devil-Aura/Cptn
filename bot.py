@@ -9,12 +9,13 @@ from pyrogram import Client, filters
 from pyrogram.types import Message
 from pyrogram.enums import ParseMode
 
-# --------- CONFIG ----------
+# -------- CONFIG ----------
 API_ID = int(os.environ.get("API_ID", "22768311"))
 API_HASH = os.environ.get("API_HASH", "702d8884f48b42e865425391432b3794")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 DATA_FILE = "anime_names.json"
 DEBUG = os.environ.get("DEBUG", "0") == "1"
+
 DEFAULT_CAPTION = """<b>➥ {AnimeName} [{Sn}]
 🎬 Episode - {Ep}
 🎧 Language - Hindi #Official
@@ -53,121 +54,129 @@ anime_names = load_anime_names()
 def similar(a, b):
     return SequenceMatcher(None, a.lower(), b.lower()).ratio()
 
-# Clean leading bracket tags and extension
-def strip_leading_tags_and_ext(s: str) -> str:
-    s = s.strip()
-    # drop leading bracket tags like [@CrunchyRollChannel]
-    s = re.sub(r'^\[.*?\]\s*', '', s)
-    # drop trailing extension if somehow present
-    s = re.sub(r'\.\w{2,5}$', '', s)
-    return s.strip()
-
+# Extracts quality first, then season/episode, then builds cleaned title for anime name
 def extract_info(filename: str):
-    """
-    Returns (name, season_str, episode_str, quality_str)
-    filename: without path (may include extension)
-    """
-    fn_orig = filename or ""
-    fn = strip_leading_tags_and_ext(fn_orig)
+    fn_raw = (filename or "").strip()
+    fn = fn_raw  # keep original for extraction
     if DEBUG:
-        logger.debug("extract_info: raw='%s' stripped='%s'", fn_orig, fn)
+        logger.debug("extract_info: raw filename='%s'", fn_raw)
 
-    # 1) try combined SxxEyy (often best)
-    combined = re.search(r'(?i)S0*(\d{1,2})\s*[^A-Za-z0-9]*E0*(\d{1,3})', fn)
+    # 1) Quality first (so quality detection isn't affected by cleaning)
+    # Recognize specific tokens first, then generic \d{3,4}p, and 4k -> 2160p
+    q_m = re.search(r'(?i)\b(2160p|1080p|720p|480p|360p|240p|144p)\b', fn)
+    if not q_m:
+        q_m = re.search(r'(?i)\b(\d{3,4}p)\b', fn)
+    if not q_m:
+        q_m = re.search(r'(?i)\b4k\b', fn)
+    quality = q_m.group(1).lower() if q_m else None
+    if quality == "4k":
+        quality = "2160p"
+    # Convert 360p -> 480p only (per your request)
+    if quality == "360p":
+        quality = "480p"
+    if not quality:
+        quality = "480p"  # fallback default
+
+    # 2) Season & Episode (robust matching)
+    season_num = None
+    ep_num = None
+
+    # Combined patterns (S01E07, S01.E07, S01 E07 etc.)
+    combined = re.search(r'(?i)S0*(\d{1,2})\s*[^A-Za-z0-9]{0,3}E0*(\d{1,3})', fn)
     if combined:
         season_num = int(combined.group(1))
         ep_num = int(combined.group(2))
     else:
-        # 2) try "Season 1 Episode 7"
-        se = re.search(r'(?i)Season[\s._-]*0*(\d{1,2}).{0,10}?Episode[\s._-]*0*(\d{1,3})', fn)
+        # Season X Episode Y
+        se = re.search(r'(?i)Season[\s._-]*0*(\d{1,2}).{0,12}?Episode[\s._-]*0*(\d{1,3})', fn)
         if se:
             season_num = int(se.group(1))
             ep_num = int(se.group(2))
         else:
-            # 3) standalone episode or season tokens:
-            ep_m = re.search(r'(?i)(?:E|Ep|Episode)[\s._-]*0*(\d{1,3})', fn)
-            sn_m = re.search(r'(?i)S(?:eason)?[\s._-]*0*(\d{1,2})', fn)
+            # standalone Episode / Ep / E
+            ep_m = re.search(r'(?i)\b(?:Ep|E|Episode)[\s._-]*0*(\d{1,3})\b', fn)
+            sn_m = re.search(r'(?i)\b(?:S|Season)[\s._-]*0*(\d{1,2})\b', fn)
             if ep_m:
                 ep_num = int(ep_m.group(1))
-            else:
-                ep_num = None
             if sn_m:
                 season_num = int(sn_m.group(1))
-            else:
-                season_num = None
 
-    # default fallback
-    if not season_num:
+    # final fallbacks
+    if season_num is None:
         season_num = 1
-    if not ep_num:
+    if ep_num is None:
         ep_num = 1
 
     sn = f"S{season_num:02d}"
     ep = f"{ep_num:02d}"
 
-    # Quality: check common tokens first, then generic \d{3,4}p, then 4k
-    q_m = re.search(r'(?i)\b(2160p|1080p|720p|480p|360p|240p|144p)\b', fn)
-    if not q_m:
-        q_m = re.search(r'(?i)\b(\d{3,4}p)\b', fn)
-    if not q_m:
-        q_m = re.search(r'(?i)\b(4k)\b', fn)
-    quality = q_m.group(1).lower() if q_m else "480p"
-    if quality == "4k":
-        quality = "2160p"
-
-    # Build a cleaned title by removing season/episode/quality + release tags
+    # 3) Build cleaned title (remove leading bracket tags, quality tokens, S/E tokens, release tags)
     t = fn
-    # remove combined patterns like S01E07
-    t = re.sub(r'(?i)S0*\d{1,2}\s*[^A-Za-z0-9]*E0*\d{1,3}', ' ', t)
-    t = re.sub(r'(?i)Season[\s._-]*\d{1,2}[\s,._-]*Episode[\s._-]*\d{1,3}', ' ', t)
-    t = re.sub(r'(?i)(?:E|Ep|Episode)[\s._-]*0*\d{1,3}', ' ', t)
-    t = re.sub(r'(?i)S(?:eason)?[\s._-]*0*\d{1,2}', ' ', t)
 
-    # release tags
-    tags_pattern = r'(?i)\b(720p|1080p|2160p|4k|HEVC|x265|x264|10bit|8bit|BluRay|BDRip|WEBRip|HDTV|HDRip|DVDRip|WEB-DL|WEBDL|Dual[\s-]*Audio|ESub|SUB|AAC|AC3|remux|rip|brrip|dub|dubbed)\b'
+    # remove leading bracket tags like [@CrunchyRollChannel]
+    t = re.sub(r'^\[.*?\]\s*', '', t)
+
+    # remove quality token we detected (safe removal)
+    if quality:
+        t = re.sub(re.escape(quality), ' ', t, flags=re.IGNORECASE)
+
+    # remove combined SxxEyy and Season/Episode/Ep tokens
+    t = re.sub(r'(?i)S0*\d{1,2}\s*[^A-Za-z0-9]{0,3}E0*\d{1,3}', ' ', t)
+    t = re.sub(r'(?i)Season[\s._-]*\d{1,2}[\s,._-]*Episode[\s._-]*\d{1,3}', ' ', t)
+    t = re.sub(r'(?i)\b(?:Ep|E|Episode)[\s._-]*0*\d{1,3}\b', ' ', t)
+    t = re.sub(r'(?i)\b(?:S|Season)[\s._-]*0*\d{1,2}\b', ' ', t)
+
+    # remove common release tags (HEVC, x265, BluRay, Dual Audio, ESub, 10bit etc.)
+    tags_pattern = r'(?i)\b(720p|1080p|2160p|4k|HEVC|x265|x264|10bit|8bit|BluRay|BDRip|WEBRip|HDTV|HDRip|DVDRip|WEB[- ]?DL|WEBDL|Dual[\s-]*Audio|ESub|SUB|AAC|AC3|remux|rip|brrip|dub|dubbed)\b'
     t = re.sub(tags_pattern, ' ', t)
+
+    # remove file extension remnants and separators
+    t = re.sub(r'\.\w{2,5}$', '', t)
     t = re.sub(r'[_\.\-]+', ' ', t)
     t = re.sub(r'\s+', ' ', t).strip()
 
     if DEBUG:
-        logger.debug("extract_info: title-candidate='%s' season=%s episode=%s quality=%s", t, sn, ep, quality)
+        logger.debug("Parsed -> quality:%s season:%s episode:%s title_candidate:'%s'", quality, sn, ep, t)
 
-    # Try to match cleaned title against saved names (similarity threshold)
+    # 4) Match cleaned title against saved names or persist new name
     name = None
     if t and not re.fullmatch(r'\d+', t):
         best_ratio = 0.0
+        best_name = None
         for n in anime_names:
             r = similar(t, n)
             if r > best_ratio:
                 best_ratio = r
-                name = n
-        # require moderate similarity to use existing saved name
+                best_name = n
+        # if good match, reuse saved name; otherwise learn new
         if best_ratio >= 0.60:
-            name = name
+            name = best_name
         else:
             name = t
-            # persist learned name (avoid duplicates)
             if name not in anime_names:
                 anime_names.append(name)
                 save_anime_names(anime_names)
     else:
-        # fallback: try matching the whole filename to saved names
+        # fallback: try matching whole filename to saved names
         best_ratio = 0.0
+        best_name = None
         for n in anime_names:
-            r = similar(fn, n)
+            r = similar(fn_raw, n)
             if r > best_ratio:
                 best_ratio = r
-                name = n
-        if best_ratio < 0.5 or not name:
+                best_name = n
+        if best_ratio >= 0.5 and best_name:
+            name = best_name
+        else:
             name = "Unknown Anime"
 
     return name, sn, ep, quality
 
-# ---------------- commands ----------------
+# ---------------- Commands ----------------
 @app.on_message(filters.command("start") & ~filters.me)
 async def start(_, message: Message):
     await message.reply_text(
-        "**👋 Welcome!**\nSend an anime file and I'll repost it with a generated caption and remove the original (if allowed).\nCommands: /addanime, /delanime, /listanime"
+        "**👋 Auto Caption Bot**\nSend an anime file and I'll repost it with a generated caption (and remove the original if I can).\nCommands: /addanime, /delanime, /listanime\nSet DEBUG=1 to get parsing logs."
     )
 
 @app.on_message(filters.command("addanime") & ~filters.me)
@@ -202,10 +211,10 @@ async def list_anime(_, message: Message):
     txt = "Saved names:\n" + "\n".join(f"• {escape(n)}" for n in anime_names)
     await message.reply_text(txt)
 
-# ---------------- main media handler ----------------
+# ---------------- Main media handler ----------------
 @app.on_message((filters.document | filters.video | filters.audio) & ~filters.me)
 async def on_media(_, message: Message):
-    # protect against bot messages
+    # ignore bot-originated messages to prevent loops
     if message.from_user and message.from_user.is_bot:
         return
 
@@ -213,14 +222,14 @@ async def on_media(_, message: Message):
     if not media:
         return
 
-    # get filename (fallback to caption)
+    # prefer actual file_name, fallback to caption if missing
     raw_name = getattr(media, "file_name", None) or (message.caption or "")
     filename = raw_name.rsplit(".", 1)[0]
 
-    # extract
+    # extract in requested order (quality, S/E, name)
     anime_name, sn, ep, quality = extract_info(filename)
     if DEBUG:
-        logger.debug("on_media: filename='%s' -> name='%s' sn=%s ep=%s quality=%s", filename, anime_name, sn, ep, quality)
+        logger.debug("on_media: raw_name='%s' -> name='%s' sn=%s ep=%s quality=%s", raw_name, anime_name, sn, ep, quality)
 
     anime_name_safe = escape(anime_name)
     caption = DEFAULT_CAPTION.format(AnimeName=anime_name_safe, Sn=sn, Ep=ep, Quality=quality)
@@ -231,18 +240,17 @@ async def on_media(_, message: Message):
         logger.info("Copied message id=%s", getattr(new_msg, "message_id", None))
     except Exception as e:
         logger.exception("Failed to copy message: %s", e)
-        return await message.reply_text("Failed to apply caption.")
+        return await message.reply_text("❌ Failed to apply caption (copy/send error).")
 
-    # try delete original (requires bot permission in groups)
+    # delete original if possible (requires permission in groups)
     try:
         await message.delete()
-        logger.info("Deleted original msg id=%s", getattr(message, "message_id", None))
+        logger.info("Deleted original message id=%s", getattr(message, "message_id", None))
     except Exception as e:
         logger.warning("Could not delete original: %s", e)
-        # only warn in groups/channels
         if message.chat.type in ("group", "supergroup", "channel"):
-            await message.reply_text("⚠️ I couldn't delete the original. Please give me Delete permission (make me admin).")
+            await message.reply_text("⚠️ I couldn't delete the original. Make me an admin with 'Delete Messages' permission.")
 
 if __name__ == "__main__":
-    logger.info("Starting bot...")
+    logger.info("Starting Auto Caption Bot...")
     app.run()
