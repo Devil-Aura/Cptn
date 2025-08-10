@@ -2,8 +2,8 @@ import re
 import logging
 import requests
 from functools import lru_cache
-from telegram import Update, InputMediaVideo, InputMediaDocument
-from telegram.ext import Updater, MessageHandler, Filters, CallbackContext
+from telegram import Update
+from telegram.ext import Application, MessageHandler, filters, ContextTypes
 
 # Configure logging
 logging.basicConfig(
@@ -113,7 +113,7 @@ def generate_caption(metadata, channel_username):
 <b>📡 Powered by : {channel_username}</b>"""
 
 # ===== Handler =====
-async def handle_message(update: Update, context: CallbackContext):
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         message = update.channel_post
         if not message:
@@ -170,18 +170,16 @@ async def handle_message(update: Update, context: CallbackContext):
 
 # ===== Main =====
 def main():
-    updater = Updater(Config.BOT_TOKEN)
-    dp = updater.dispatcher
+    application = Application.builder().token(Config.BOT_TOKEN).build()
     
     # Handle videos/documents in any channel
-    dp.add_handler(MessageHandler(
-        Filters.chat_type.channel & (Filters.video | Filters.document),
+    application.add_handler(MessageHandler(
+        filters.ChatType.CHANNEL & (filters.VIDEO | filters.Document.ALL),
         handle_message
     ))
     
-    updater.start_polling()
+    application.run_polling()
     logger.info("Bot is ready for all channels!")
-    updater.idle()
 
 if __name__ == '__main__':
     main()
