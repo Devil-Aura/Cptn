@@ -45,13 +45,14 @@ async def start_cmd(_, message: Message):
     await message.reply_text("I am a private bot of @World_Fastest_Bots")
 
 # HELP COMMAND
-@app.on_message(filters.command("help1") & filters.private)
+@app.on_message(filters.command("help") & filters.private)
 async def help_cmd(_, message: Message):
-    help_text = ("/setcaption - Set custom caption (Use in channel)\n"
+    help_text = ("<b>Available Commands:</b>\n\n"
+                 "/setcaption - Set custom caption (Use in channel)\n"
                  "/showcaption - Show current caption\n"
                  "/addanime - Add anime to database\n"
                  "/deleteanime - Remove anime from database\n"
-                 "/listanime - List all saved anime\n"
+                 "/listanime - List all saved anime\n\n"
                  "➜ Add me as admin in your channel with 'Post Messages' permission.")
     await message.reply_text(help_text)
 
@@ -72,7 +73,7 @@ async def add_anime(_, message: Message):
     await message.reply_text(f"✅ Added: {escape(name)}")
 
 # DELETE ANIME COMMAND
-@app.on_message(filters.command(("deleteanime", "delanime")) & filters.private)
+@app.on_message(filters.command(["deleteanime", "delanime"]) & filters.private)
 async def delete_anime(_, message: Message):
     try:
         name = message.text.split(None, 1)[1].strip()
@@ -95,7 +96,13 @@ async def list_anime(_, message: Message):
         return await message.reply_text("No anime in database yet!")
     
     text = "📚 Saved Anime:\n\n" + "\n".join(f"• {escape(name)}" for name in sorted(anime_names))
-    await message.reply_text(text[:4000])  # Telegram message length limit
+    # Split long messages to avoid Telegram's length limit
+    if len(text) > 4000:
+        parts = [text[i:i+4000] for i in range(0, len(text), 4000)]
+        for part in parts:
+            await message.reply_text(part)
+    else:
+        await message.reply_text(text)
 
 # SET CUSTOM CAPTION (Channel only)
 @app.on_message(filters.command("setcaption") & filters.channel)
@@ -105,18 +112,23 @@ async def set_caption(_, message: Message):
 
     custom_caption = message.text.split(" ", 1)[1]
     channel_captions[message.chat.id] = custom_caption
-    await message.reply_text("✅ Custom caption set successfully (will reset on restart)!")
+    await message.reply_text("✅ Custom caption set successfully!")
 
 # SHOW CURRENT CAPTION
 @app.on_message(filters.command("showcaption") & filters.channel)
 async def show_caption(_, message: Message):
     current_caption = channel_captions.get(message.chat.id, default_caption)
-    await message.reply_text(f"**Current Caption Template:**\n\n{current_caption}")
+    await message.reply_text(f"<b>Current Caption Template:</b>\n\n{current_caption}")
 
 # AUTO CAPTION (Channels only)
 @app.on_message(filters.channel & (filters.video | filters.document))
 async def auto_caption(_, message: Message):
-    file_name = message.document.file_name if message.document else message.video.file_name
+    if message.document:
+        file_name = message.document.file_name
+    elif message.video:
+        file_name = message.video.file_name
+    else:
+        return
 
     # Extract details using regex
     match = re.search(r"(?:\[.*?\]\s*)?(.+?)\s(S\d+)(E\d+).*?(\d{3,4}p)", file_name, re.IGNORECASE)
@@ -142,20 +154,20 @@ async def auto_caption(_, message: Message):
     try:
         # Repost the file with the caption and delete original
         if message.document:
-            await app.send_document(
-                chat_id=message.chat.id,
+            await message.reply_document(
                 document=message.document.file_id,
-                caption=caption_text
+                caption=caption_text,
+                parse_mode="HTML"
             )
         else:
-            await app.send_video(
-                chat_id=message.chat.id,
+            await message.reply_video(
                 video=message.video.file_id,
-                caption=caption_text
+                caption=caption_text,
+                parse_mode="HTML"
             )
 
         await message.delete()
     except Exception as e:
-        await message.reply_text(f"❌ Error sending file: {e}")
+        await message.reply_text(f"❌ Error: {str(e)}")
 
 app.run()
