@@ -39,179 +39,131 @@ app = Client(
     bot_token=BOT_TOKEN
 )
 
-# ----- Helper Functions -----
-def load_anime_names():
-    global anime_names
-    try:
-        if os.path.exists(DATA_FILE):
-            with open(DATA_FILE, "r", encoding="utf-8") as f:
-                anime_names = json.load(f)
-                logger.info(f"Loaded {len(anime_names)} anime names")
-        else:
-            anime_names = []
-    except Exception as e:
-        logger.error(f"Error loading anime names: {e}")
-        anime_names = []
+# ---------- Regex helpers (precompiled) ----------
 
-def save_anime_names():
-    try:
-        with open(DATA_FILE, "w", encoding="utf-8") as f:
-            json.dump(anime_names, f, ensure_ascii=False, indent=2)
-        logger.info(f"Saved {len(anime_names)} anime names")
-    except Exception as e:
-        logger.error(f"Error saving anime names: {e}")
+# Remove trailing multi-extensions: .mkv.mp4 etc.
+RE_MULTI_EXT = re.compile(
+    r"\.(?:mkv|mp4|avi|mov|flv|webm|wmv|m4v|ts|mpg|mpeg)"
+    r"(?:\.(?:mkv|mp4|avi|mov|flv|webm|wmv|m4v|ts|mpg|mpeg))*$",
+    re.IGNORECASE
+)
 
-# ------------------ Robust filename parsing ------------------
-
-# Precompile regexes
-RE_MULTI_EXT = re.compile(r"\.(?:mkv|mp4|avi|mov|flv|webm|wmv|m4v|ts|mpg|mpeg)(?:\.(?:mkv|mp4|avi|mov|flv|webm|wmv|m4v|ts|mpg|mpeg))*$", re.IGNORECASE)
-
-# Quality tokens like 2160p, 1080p, 720p, 480p, 360p (p can be missing or upper)
-RE_QUALITY = re.compile(r"\b(2160|1440|1080|720|540|480|360|240)\s*[pP]\b")
-RE_QUALITY_BARE = re.compile(r"\b(2160|1440|1080|720|540|480|360|240)\b")
-
-# Season/Episode patterns
-RE_SxxEyy = re.compile(r"\bS(\d{1,2})[ ._-]*E(\d{1,3})\b", re.IGNORECASE)
-RE_SEASON_EPISODE = re.compile(r"\bSeason\s*(\d{1,2})\s*(?:Episode|Ep)?\s*(\d{1,3})\b", re.IGNORECASE)
-RE_EP_LONG = re.compile(r"\bEpisode\s*[-_ ]*(\d{1,3})\b", re.IGNORECASE)
-RE_EP_SHORT = re.compile(r"\bEp\s*[-_ ]*(\d{1,3})\b", re.IGNORECASE)
-RE_E_ONLY  = re.compile(r"\bE\s*[-_ ]*(\d{1,3})\b", re.IGNORECASE)
-
-# Strict fallback for plain trailing number as episode (to avoid titles like "86" being mistaken)
-RE_TRAILING_EP = re.compile(r"(?:^|[\s\-_\.])(\d{1,3})(?:\s*(?:v\d+|final|end))?\s*$", re.IGNORECASE)
-
-# Bracket pairs to strip as tags when building the display name
+# Bracketed tags to strip from the title
 RE_BRACKETS = re.compile(r"(\[.*?\]|\(.*?\)|\{.*?\})")
 
-def _strip_multi_extensions(name: str) -> str:
-    return RE_MULTI_EXT.sub("", name)
-
-def _normalize_separators(s: str) -> str:
+# Normalization = turn separators into spaces and collapse
+def _normalize(s: str) -> str:
+    s = RE_MULTI_EXT.sub("", s)               # drop multi-extension
     s = s.replace("_", " ").replace(".", " ").replace("-", " ")
-    s = re.sub(r"\s+", " ", s)
-    return s.strip()
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
 
-def _find_quality(original: str) -> tuple | None:
-    # First try classic ####p
-    m = RE_QUALITY.search(original)
+# Season/Episode patterns (searched on normalized string)
+RE_SxxEyy     = re.compile(r"\bS(\d{1,2})\s*[.\- ]?\s*E(\d{1,3})\b", re.IGNORECASE)
+RE_SEASON_EP  = re.compile(r"\bSeason\s*(\d{1,2})\s*(?:Episode|Ep)?\s*(\d{1,3})\b", re.IGNORECASE)
+RE_EPISODE    = re.compile(r"\bEpisode\s*[-_. ]*(\d{1,3})\b", re.IGNORECASE)
+RE_EP         = re.compile(r"\bEp\s*[-_. ]*(\d{1,3})\b", re.IGNORECASE)
+RE_E          = re.compile(r"\bE\s*[-_. ]*(\d{1,3})\b", re.IGNORECASE)
+
+# Very cautious trailing-number fallback (only if quality exists)
+RE_TRAIL_NUM  = re.compile(r"(?:^|[\s])(\d{1,3})(?:\s*(?:v\d+|final|end))?\s*$", re.IGNORECASE)
+
+# Quality patterns (searched on normalized string so `_360P` → ` 360P`)
+RE_QUALITY_P  = re.compile(r"(?:^|[\s])(?:(2160|1440|1080|720|540|480|360|240))\s*[pP](?=$|[\s])")
+RE_QUALITY_BARE = re.compile(r"(?:^|[\s])(?:(2160|1440|1080|720|540|480|360|240))(?:$|[\s])")
+
+def _find_season_episode(norm: str):
+    # Highest confidence first
+    for rx in (RE_SxxEyy, RE_SEASON_EP):
+        m = rx.search(norm)
+        if m:
+            s = f"S{int(m.group(1)):02d}"
+            e = f"{int(m.group(2)):02d}"
+            return s, e, m.start(), m.end()
+    for rx in (RE_EPISODE, RE_EP, RE_E):
+        m = rx.search(norm)
+        if m:
+            s = "S01"
+            e = f"{int(m.group(1)):02d}"
+            return s, e, m.start(), m.end()
+    # If not found, try trailing number (we will only accept this later if quality exists too)
+    m = RE_TRAIL_NUM.search(norm)
     if m:
-        q = int(m.group(1))
-        return (q, m.start(), m.end())
-    # Then a bare number token that is followed by " SD/HD/…"? We avoid false positives;
-    # only use bare number if there is no ####p anywhere.
-    m2 = RE_QUALITY_BARE.search(original)
-    if m2:
-        q = int(m2.group(1))
-        # Require that around it there are hints like p-less with tags (e.g., "360P SD" becomes 360 found by RE_QUALITY above).
-        # Since this is a fallback, we still accept it because user examples include "360P SD" which RE_QUALITY would catch.
-        return (q, m2.start(), m2.end())
+        s = "S01"
+        e = f"{int(m.group(1)):02d}"
+        return s, e, m.start(1), m.end(1)
     return None
 
-def _find_season_episode(original: str):
-    # Ordered by confidence
-    for rx in (RE_SxxEyy, RE_SEASON_EPISODE):
-        m = rx.search(original)
-        if m:
-            season = f"S{int(m.group(1)):02d}"
-            episode = f"{int(m.group(2)):02d}"
-            return season, episode, m.start(), m.end()
-    for rx in (RE_EP_LONG, RE_EP_SHORT, RE_E_ONLY):
-        m = rx.search(original)
-        if m:
-            season = "S01"
-            episode = f"{int(m.group(1)):02d}"
-            return season, episode, m.start(), m.end()
-    # Very strict fallback: last short number token near the end
-    m = RE_TRAILING_EP.search(_normalize_separators(_strip_multi_extensions(original)))
+def _find_quality(norm: str):
+    # Prefer explicit ####p
+    m = RE_QUALITY_P.search(norm)
     if m:
-        season = "S01"
-        episode = f"{int(m.group(1)):02d}"
-        # We don't have precise positions on original here; return -1 markers
-        return season, episode, -1, -1
+        q = int(m.group(1))
+        return q, m.start(1), m.end(1)  # return index of the number
+    # Fallback: bare #### only (rare). Useful for patterns like "1080 x265" (discourage unless no p-form found).
+    m2 = RE_QUALITY_BARE.search(norm)
+    if m2:
+        q = int(m2.group(1))
+        return q, m2.start(1), m2.end(1)
     return None
 
 def parse_filename(filename: str):
     """
-    Flexible parser for messy anime filenames.
-    Returns: (anime_name, season, episode, quality) or None if not confident.
+    Robust parser:
+      1) Normalize separators for reliable matching.
+      2) Extract Season/Episode, then Quality.
+      3) Build AnimeName as text before the earliest SE/Quality token,
+         after removing bracketed tags, and cleanup.
+      4) Convert 360p -> 480p, keep 'p' lowercase.
+    Returns: (anime_name, season, episode, quality) or None.
     """
     if not filename:
         return None
 
-    # Work on a copy without multi-extensions
-    base = _strip_multi_extensions(filename)
+    # Keep an original normalized view for pattern search
+    norm = _normalize(filename)
 
-    # Detect quality (from original text, including brackets)
-    qinfo = _find_quality(base)
-    quality_val = None
-    if qinfo:
-        quality_val = qinfo[0]  # integer like 1080
+    # Find SE & quality
+    se = _find_season_episode(norm)           # (season, episode, start, end) or None
+    q  = _find_quality(norm)                  # (q_int, start, end) or None
 
-    # Detect season/episode (from original text, including brackets)
-    seinfo = _find_season_episode(base)
-    if not seinfo:
-        # Can't confidently find episode → don't guess
+    if not q:
+        # No quality → fail safely (don't guess)
         return None
-    season, episode, se_start, se_end = seinfo
+
+    # If SE came only from trailing number, ensure we also have quality (we do) and that SE starts after any title text.
+    if not se:
+        return None
+
+    season, episode, se_start, se_end = se
+    q_val, q_start, q_end = q
 
     # Normalize quality string
-    if quality_val is not None:
-        if quality_val == 360:
-            quality_str = "480p"   # convert 360p → 480p
-        else:
-            quality_str = f"{quality_val}p"
+    if q_val == 360:
+        quality = "480p"
     else:
-        # If quality is missing, we *could* default or fail. Safer: fail to avoid wrong captions.
-        return None
+        quality = f"{q_val}p"
 
-    # Build clean string to extract the title
-    cleaned = RE_BRACKETS.sub(" ", base)              # drop [group] (tags) {extra}
-    cleaned = _normalize_separators(cleaned)
+    # Where to cut the title: the earliest token among SE and quality
+    cut_idx = min(se_start if se_start >= 0 else len(norm),
+                  q_start if q_start >= 0 else len(norm))
 
-    # Try to locate the same SE pattern on cleaned to cut the title precisely
-    cut_idx = None
-    for rx in (RE_SxxEyy, RE_SEASON_EPISODE, RE_EP_LONG, RE_EP_SHORT, RE_E_ONLY):
-        m = rx.search(cleaned)
-        if m:
-            cut_idx = m.start()
-            break
+    # Title slice (pre-tags removal)
+    raw_title = norm[:cut_idx].strip()
 
-    if cut_idx is None and qinfo:
-        # If SE token vanished due to cleanup, cut by quality position in cleaned
-        # Re-find quality on cleaned text
-        m_q = RE_QUALITY.search(cleaned) or RE_QUALITY_BARE.search(cleaned)
-        if m_q:
-            cut_idx = m_q.start()
+    # Remove bracketed tags from that slice, then re-normalize
+    title_no_tags = _normalize(RE_BRACKETS.sub(" ", raw_title))
 
-    # Fallback: if still None, cut by where the trailing number begins (rare)
-    if cut_idx is None:
-        m_tr = RE_TRAILING_EP.search(cleaned)
-        if m_tr:
-            cut_idx = m_tr.start(1)
+    # Final cleanup: remove trailing separators
+    anime_name = re.sub(r"[~|:/\\,.+–—\-]*$", "", title_no_tags).strip()
 
-    # If still None (very rare), give up to avoid mixing fields
-    if cut_idx is None:
-        return None
-
-    title = cleaned[:cut_idx].strip()
-    # Remove common trailing separators
-    title = re.sub(r"[~|:/\\,.+–—\-]*$", "", title).strip()
-
-    # Extra safety: if title got empty due to aggressive tags, try to recover from original
-    if not title:
-        # Take everything before the first SE match in the original, then clean it
-        if se_start not in (-1, None):
-            rough = _normalize_separators(RE_BRACKETS.sub(" ", base[:se_start]))
-            title = re.sub(r"[~|:/\\,.+–—\-]*$", "", rough).strip()
-
-    if not title:
-        # Still empty → fail safely
+    if not anime_name:
         return None
 
     # Escape for HTML caption
-    title_safe = escape(title)
+    anime_name_safe = escape(anime_name)
 
-    return title_safe, season, episode, quality_str
+    return anime_name_safe, season, episode, quality
 
 # ----- Command Handlers -----
 @app.on_message(filters.command("start") & filters.private)
@@ -240,11 +192,11 @@ async def help_cmd(_, message: Message):
 /listanime - List all anime titles
 
 <b>Supported Filename Examples:</b>
-- AnimeName S01E01 1080p.mkv
-- [Group] Anime Name - 01 (720p).mp4
-- Anime.Name.Episode.01.480p.mkv
-- Anime Name Ep 07 [1080p] x265.mkv
-- Welcome to the Outcast's Restaurant! S01E08 [@CrunchyRollChannel]_360P SD"""
+- [@Group] Anime Title S01E12 1080p HEVC.mkv
+- Anime Title Season 1 Episode 07 [720p].mp4
+- Anime Title Ep 05 (1080p) x265.mkv
+- Death Note S01E01 [@CrunchyRollChannel]_360P SD.mp4
+- Fairy Tail S04E05 [@CrunchyRollChannel]_360P SD.mp4"""
     await message.reply_text(help_text, parse_mode=ParseMode.HTML)
 
 # ----- Channel Handlers -----
@@ -252,16 +204,16 @@ async def help_cmd(_, message: Message):
 async def handle_media(_, message: Message):
     try:
         # Get filename
+        filename = ""
         if message.video:
             filename = message.video.file_name or ""
         elif message.document:
             filename = message.document.file_name or ""
-        else:
+        if not filename:
             return
 
         logger.info(f"Processing file: {filename}")
 
-        # Parse filename
         parsed = parse_filename(filename)
         if not parsed:
             logger.warning(f"Failed to parse filename: {filename}")
@@ -276,7 +228,6 @@ async def handle_media(_, message: Message):
 
         anime_name, season, episode, quality = parsed
 
-        # Get caption template
         caption = channel_captions.get(message.chat.id, DEFAULT_CAPTION)
         formatted_caption = caption.format(
             AnimeName=anime_name,
@@ -285,7 +236,6 @@ async def handle_media(_, message: Message):
             Quality=quality
         )
 
-        # Repost with caption
         if message.video:
             await message.reply_video(
                 message.video.file_id,
@@ -299,7 +249,7 @@ async def handle_media(_, message: Message):
                 parse_mode=ParseMode.HTML
             )
 
-        # Try to delete original
+        # Try to delete original (optional)
         try:
             await message.delete()
         except Exception as e:
@@ -316,6 +266,12 @@ async def handle_media(_, message: Message):
 
 # ----- Startup -----
 if __name__ == "__main__":
-    load_anime_names()
+    try:
+        if os.path.exists(DATA_FILE):
+            with open(DATA_FILE, "r", encoding="utf-8") as f:
+                anime_names = json.load(f)
+    except Exception as e:
+        logger.error(f"Error loading anime names: {e}")
+        anime_names = []
     logger.info("Starting bot...")
     app.run()
