@@ -17,14 +17,14 @@ from pyrogram.enums import ParseMode
 from pyrogram.types import Message
 
 # ================================
-# CONFIG — fill these or use env
+# CONFIG — fill these or set as env
 # ================================
-API_ID = int(os.environ.get("API_ID", "22768311"))
-API_HASH = os.environ.get("API_HASH", "702d8884f48b42e865425391432b3794")
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+API_ID = int(os.environ.get("API_ID", "22768311"))      # <-- put your API ID
+API_HASH = os.environ.get("API_HASH", "702d8884f48b42e865425391432b3794")  # <-- put your API HASH
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")  # <-- put your BOT TOKEN
 
-# Secret login code (case-insensitive, extra spaces ignored)
-SECRET_CODE_CANONICAL = "mai kaam chor hu"
+# Secret login code (case/space-insensitive)
+SECRET_CODE = "mai kaam chor hu"
 
 # Persist access here
 ACCESS_DB_FILE = "access_db.json"
@@ -35,7 +35,7 @@ DEFAULT_CAPTION = """<b>➥ {AnimeName} [{Sn}]
 🎧 Language - Hindi #Official
 🔎 Quality : {Quality}
 📡 Powered by :
-@CrunchyRollChannel.</b>"""
+@CrunchyRollChannel</b>"""
 
 # Funny lines
 OVERWORK_LINES = [
@@ -52,13 +52,13 @@ IDLE_LINES = [
 ]
 
 # Overwork thresholds
-OVERWORK_WINDOW = 60           # seconds
-OVERWORK_THRESHOLD = 8         # messages per chat per window to trigger a quip
+OVERWORK_WINDOW = 60           # seconds per chat
+OVERWORK_THRESHOLD = 8         # messages in window to trigger quip
 OVERWORK_COOLDOWN = 120        # seconds between quips per chat
 
 # Idle nudges
 IDLE_CHECK_EVERY = 300         # seconds
-IDLE_THRESHOLD = 900           # if no activity for this long, may nudge
+IDLE_THRESHOLD = 900           # if no activity this long, may nudge
 IDLE_CHANCE = 0.35             # 35% chance to send when threshold met
 
 # ================================
@@ -71,28 +71,12 @@ logging.basicConfig(
 log = logging.getLogger("PrivateFunnyCaptionBot")
 
 # ================================
-# Storage (access + activity)
+# Access storage (persistent)
 # ================================
-access_db = {
-    "users": [],   # user_ids that logged in via PM
-    "chats": []    # chat_ids (groups/channels) logged in via /login inside them
-}
+access_db = {"users": [], "chats": []}
 users_logged: set[int] = set()
 chats_logged: set[int] = set()
 
-# recent activity tracking per chat for overwork & idle
-recent_msgs: dict[int, deque] = defaultdict(lambda: deque(maxlen=500))  # timestamps
-last_quip_at: dict[int, datetime] = {}       # last time we sent an overwork quip
-last_activity: dict[int, datetime] = {}      # last activity in a chat
-
-# ================================
-# App
-# ================================
-app = Client("AutoCaptionBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
-
-# ================================
-# Helpers: Access DB
-# ================================
 def load_access_db() -> None:
     global access_db, users_logged, chats_logged
     if os.path.exists(ACCESS_DB_FILE):
@@ -120,15 +104,21 @@ def save_access_db() -> None:
         log.exception("Failed to save access DB.")
 
 def normalize_code(text: str) -> str:
-    # Lowercase, collapse multiple spaces
-    return re.sub(r"\s+", " ", text.strip().lower())
+    return re.sub(r"\s+", " ", (text or "").strip().lower())
 
 def has_access(message: Message) -> bool:
     if message.chat.type in ("group", "supergroup", "channel"):
         return message.chat.id in chats_logged
-    # private
     uid = message.from_user.id if message.from_user else None
     return bool(uid) and uid in users_logged
+
+# ================================
+# Activity tracking (overwork/idle)
+# ================================
+recent_msgs: dict[int, deque] = defaultdict(lambda: deque(maxlen=500))  # per-chat timestamps
+last_quip_at: dict[int, datetime] = {}       # per-chat last quip time
+last_activity: dict[int, datetime] = {}      # per-chat last activity
+total_work_counter: int = 0                  # global work count
 
 def mark_activity(chat_id: int) -> None:
     now = datetime.utcnow()
@@ -137,10 +127,8 @@ def mark_activity(chat_id: int) -> None:
     dq.append(now.timestamp())
 
 def maybe_send_overwork_quip(chat_id: int) -> Optional[str]:
-    # Count messages in window
     now_ts = datetime.utcnow().timestamp()
     dq = recent_msgs[chat_id]
-    # Drop old timestamps
     while dq and now_ts - dq[0] > OVERWORK_WINDOW:
         dq.popleft()
     if len(dq) >= OVERWORK_THRESHOLD:
@@ -151,7 +139,7 @@ def maybe_send_overwork_quip(chat_id: int) -> Optional[str]:
     return None
 
 async def idle_nudger():
-    await app.wait_until_ready()
+    # background task, sends idle nudges to logged chats after inactivity
     while True:
         await asyncio.sleep(IDLE_CHECK_EVERY)
         now = datetime.utcnow()
@@ -159,15 +147,13 @@ async def idle_nudger():
             last = last_activity.get(chat_id)
             if not last:
                 continue
-            if (now - last).total_seconds() >= IDLE_THRESHOLD:
-                if random.random() < IDLE_CHANCE:
-                    try:
-                        await app.send_message(chat_id, random.choice(IDLE_LINES))
-                        # avoid spamming: move activity forward a bit
-                        last_activity[chat_id] = now - timedelta(seconds=IDLE_THRESHOLD // 2)
-                    except Exception:
-                        # ignore send failures (e.g., removed perms)
-                        pass
+            if (now - last).total_seconds() >= IDLE_THRESHOLD and random.random() < IDLE_CHANCE:
+                try:
+                    await app.send_message(chat_id, random.choice(IDLE_LINES))
+                    # reduce chance of immediate repeat
+                    last_activity[chat_id] = now - timedelta(seconds=IDLE_THRESHOLD // 2)
+                except Exception:
+                    pass
 
 # ================================
 # Filename Parser (Ultra Robust)
@@ -183,7 +169,7 @@ RE_MULTI_SEP = re.compile(r"[_\.\-]+")
 RE_MULTI_SPACE = re.compile(r"\s+")
 
 RE_SXXEYY   = re.compile(r"\bS(\d{1,2})\s*[._\-\s]*E(\d{1,3})\b", re.IGNORECASE)
-RE_MINUS_E  = re.compile(r"(?:^|[\s\-_\.])[Ee](\d{1,4})(?:$|[\s\-_\.])")   # "- E226" etc.
+RE_MINUS_E  = re.compile(r"(?:^|[\s\-_\.])[Ee](\d{1,4})(?:$|[\s\-_\.])")  # "- E226" etc.
 RE_SEASON_EP= re.compile(r"\bSeason\s*(\d{1,2})\s*(?:Episode|Ep)?\s*(\d{1,3})\b", re.IGNORECASE)
 RE_EPISODE  = re.compile(r"\bEpisode\s*[:\.\-\s_]*?(\d{1,3})\b", re.IGNORECASE)
 RE_EP       = re.compile(r"\bEp\s*[:\.\-\s_]*?(\d{1,3})\b", re.IGNORECASE)
@@ -201,7 +187,6 @@ def _remove_trailing_ext(s: str) -> str:
     return RE_MULTI_EXT.sub("", s).strip()
 
 def _remove_leading_groups(s: str) -> str:
-    # repeatedly remove only at start
     while True:
         m = RE_LEADING_BRACKETS.match(s)
         if not m:
@@ -210,7 +195,6 @@ def _remove_leading_groups(s: str) -> str:
     return s.strip()
 
 def _normalize_detect(s: str) -> str:
-    # keep contents, remove bracket chars, unify separators
     s2 = re.sub(r"[\[\]\(\)\{\}]", " ", s)
     s2 = RE_MULTI_SEP.sub(" ", s2)
     s2 = RE_MULTI_SPACE.sub(" ", s2)
@@ -234,7 +218,6 @@ def parse_filename(filename: str) -> Optional[Tuple[str, str, str, str]]:
     if not filename:
         return None
 
-    # base cleanup
     base = _remove_trailing_ext(filename)
     base = _remove_leading_groups(base)
 
@@ -257,7 +240,6 @@ def parse_filename(filename: str) -> Optional[Tuple[str, str, str, str]]:
             episode = f"{int(m2.group(2)):02d}"
             cut_pos_candidates.append(m2.start())
         else:
-            # Accept "- E226" variant
             mE = RE_MINUS_E.search(work)
             if mE:
                 season = "S01"
@@ -289,11 +271,10 @@ def parse_filename(filename: str) -> Optional[Tuple[str, str, str, str]]:
     quality = "480p" if q_val == 360 else f"{q_val}p"
     cut_pos_candidates.append(qm.start())
 
-    # ---- Build anime title from title_pool up to earliest token
+    # ---- Anime title: take title_pool up to earliest token
     cut_idx = min(cut_pos_candidates) if cut_pos_candidates else len(title_pool)
     raw_title = title_pool[:cut_idx].strip()
 
-    # polish
     raw_title = _strip_trailing_junk(raw_title)
     raw_title = re.sub(r"^@\S+\s*", "", raw_title).strip()
     raw_title = raw_title.strip(" -_:|,")
@@ -306,31 +287,28 @@ def parse_filename(filename: str) -> Optional[Tuple[str, str, str, str]]:
     return anime_name, season, episode, quality
 
 # ================================
-# Access Guard Decorator
+# Pyrogram App
+# ================================
+app = Client("AutoCaptionBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+
+# ================================
+# Access guard decorator
 # ================================
 def guard_access(handler):
     async def wrapper(client: Client, message: Message):
-        chat = message.chat
-        uid = message.from_user.id if message.from_user else None
-        allowed = has_access(message)
-        if not allowed:
-            # Minimal, non-leaky response
-            if chat.type in ("group", "supergroup", "channel"):
-                await message.reply("🔒 Private Bot: Pehle login karo.\n`/login Mai Kaam chor hu`", quote=True)
-            else:
-                await message.reply("🔒 Private Bot: Pehle login karo.\n`/login Mai Kaam chor hu`", quote=True)
+        if not has_access(message):
+            await message.reply("🔒 Private Bot: Pehle login karo.\n`/login Mai Kaam chor hu`", quote=True)
             return
-        # mark activity & maybe quip
-        mark_activity(chat.id)
-        out = await handler(client, message)
-        # overwork check (per chat)
-        quip = maybe_send_overwork_quip(chat.id)
+        # mark activity & maybe quip later
+        mark_activity(message.chat.id)
+        result = await handler(client, message)
+        quip = maybe_send_overwork_quip(message.chat.id)
         if quip:
             try:
-                await app.send_message(chat.id, quip)
+                await app.send_message(message.chat.id, quip)
             except Exception:
                 pass
-        return out
+        return result
     return wrapper
 
 # ================================
@@ -342,31 +320,31 @@ async def start_cmd(_, m: Message):
         "👋 <b>Private Auto-Caption Bot</b>\n\n"
         "Use <code>/login Mai Kaam chor hu</code> to unlock.\n"
         "Add me to your <i>group/channel</i> and run the same command there for one-time access.\n\n"
-        "After that, just post videos/documents — I’ll detect Anime Name, Season, Episode & Quality.",
+        "Post videos/documents — I’ll detect Anime Name, Season, Episode & Quality.",
         parse_mode=ParseMode.HTML
     )
 
 @app.on_message(filters.command("help") & ~filters.forwarded)
 async def help_cmd(_, m: Message):
-    await m.reply_text(
+    text = (
         "<b>Help</b>\n"
         "• <code>/login Mai Kaam chor hu</code> — unlock access (PM/group/channel)\n"
         "• Post or forward media (video/document) with filename — I’ll caption it.\n\n"
-        "Quality rules: 360p → 480p, others unchanged; <i>p</i> is lowercase.\n"
-        "Examples I handle:\n"
+        "Quality rules: 360p → 480p, others unchanged (lowercase p).\n"
+        "Examples:\n"
         "• [@Group]_Anime_Name_S01E07_[480p].mkv.mp4\n"
         "• Naruto Shippuden - E226 [1080p BD x265 10bit Multi Audio].mkv\n"
-        "• I Was Reincarnated as the 7th Prince S01E08 480p BluRay.mkv",
-        parse_mode=ParseMode.HTML
+        "• I Was Reincarnated as the 7th Prince S01E08 480p BluRay.mkv"
     )
+    await m.reply_text(text, parse_mode=ParseMode.HTML)
 
 @app.on_message(filters.command("login") & ~filters.forwarded)
 async def login_cmd(_, m: Message):
-    # Extract code after /login (handle "/login Mai Kaam Chor Hu")
+    # Extract code after /login
     text = m.text or ""
     parts = text.split(None, 1)
     code = normalize_code(parts[1]) if len(parts) > 1 else ""
-    if code != SECRET_CODE_CANONICAL:
+    if code != SECRET_CODE:
         await m.reply_text("❌ Wrong code! Sahi code bolo: <code>Mai Kaam chor hu</code>", parse_mode=ParseMode.HTML)
         return
 
@@ -388,11 +366,13 @@ async def status_cmd(_, m: Message):
     await m.reply_text("✅ Access active. Main taiyaar hu! ⚙️")
 
 # ================================
-# Media Handlers (Channel/Groups/PM)
+# Media Handlers
 # ================================
 @app.on_message((filters.video | filters.document) & ~filters.forwarded)
 @guard_access
 async def media_handler(_, m: Message):
+    global total_work_counter
+
     filename = ""
     if m.video and m.video.file_name:
         filename = m.video.file_name
@@ -404,7 +384,6 @@ async def media_handler(_, m: Message):
 
     parsed = parse_filename(filename)
     if not parsed:
-        # stay quiet about structure specifics; just minimal info
         await m.reply_text("❌ Caption parse failed. Filename me Season/Episode & Quality hona chahiye.")
         return
 
@@ -412,7 +391,7 @@ async def media_handler(_, m: Message):
     caption = DEFAULT_CAPTION.format(
         AnimeName=anime_name,
         Sn=season,
-        Ep=episode,
+        Ep=str(int(episode)),
         Quality=quality
     )
 
@@ -424,18 +403,19 @@ async def media_handler(_, m: Message):
     except Exception:
         log.exception("Failed to send captioned media.")
 
-    # Optional: try deleting the original to avoid duplicates (won't error if missing perms)
+    # Optional: try deleting the original (ignores errors)
     try:
         await m.delete()
     except Exception:
         pass
 
-# ================================
-# Text Handler (for testing via PM/Group)
-# ================================
+    total_work_counter += 1
+
+# Text test: allow pasting a filename to test parsing (only after login)
 @app.on_message(filters.text & ~filters.command(["start", "help", "login", "status"]) & ~filters.forwarded)
 @guard_access
 async def text_filename_test(_, m: Message):
+    global total_work_counter
     text = (m.text or "").strip()
     if not text:
         return
@@ -450,14 +430,12 @@ async def text_filename_test(_, m: Message):
         f"🎥 <code>{quality}</code>",
         parse_mode=ParseMode.HTML
     )
+    total_work_counter += 1
 
 # ================================
-# Startup
+# MAIN (no .idle() / no .wait_until_ready())
 # ================================
-@app.on_raw_update()
-async def _track_activity(_, __):
-    # This dummy listener ensures the client is "ready" for idle_nudger
-    return
+app = app  # (just to keep name visible for idle task)
 
 async def main():
     load_access_db()
@@ -465,7 +443,8 @@ async def main():
     # background idle nudger
     asyncio.get_event_loop().create_task(idle_nudger())
     log.info("✅ Bot started. Waiting for files...")
-    await app.idle()
+    # keep alive forever
+    await asyncio.Event().wait()
 
 if __name__ == "__main__":
     try:
