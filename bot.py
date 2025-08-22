@@ -1,26 +1,35 @@
-from pyrogram import Client, filters
-from pyrogram.types import Message
-from pyrogram.enums import ParseMode
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import os
 import re
 import json
-import os
-from html import escape
+import random
+import asyncio
 import logging
+from collections import defaultdict, deque
+from datetime import datetime, timedelta
+from html import escape
+from typing import Optional, Tuple
 
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+from pyrogram import Client, filters
+from pyrogram.enums import ParseMode
+from pyrogram.types import Message
 
-# BOT CONFIG
-API_ID = 22768311
-API_HASH = "702d8884f48b42e865425391432b3794"
-BOT_TOKEN = ""  # <- put your token
-DATA_FILE = "anime_names.json"
+# ================================
+# CONFIG — fill these or use env
+# ================================
+API_ID = int(os.environ.get("API_ID", "22768311"))
+API_HASH = os.environ.get("API_HASH", "702d8884f48b42e865425391432b3794")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 
-# Default Caption Template
+# Secret login code (case-insensitive, extra spaces ignored)
+SECRET_CODE_CANONICAL = "mai kaam chor hu"
+
+# Persist access here
+ACCESS_DB_FILE = "access_db.json"
+
+# Caption template (HTML)
 DEFAULT_CAPTION = """<b>➥ {AnimeName} [{Sn}]
 🎬 Episode - {Ep}
 🎧 Language - Hindi #Official
@@ -28,269 +37,438 @@ DEFAULT_CAPTION = """<b>➥ {AnimeName} [{Sn}]
 📡 Powered by :
 @CrunchyRollChannel.</b>"""
 
-# In-Memory Storage
-channel_captions = {}
-anime_names = []
+# Funny lines
+OVERWORK_LINES = [
+    "Mai aur nahi kar sakta, thak gya hu 😭",
+    "Aur nahi hoga mujhse 😩",
+    "Ab meri jaan loge kya? 💀",
+    "Bas ho gaya, mujhe chain do 😴"
+]
+IDLE_LINES = [
+    "Oye kaha gaye ho? Kaam nahi karna kya? 😒",
+    "Yaar bore ho raha hu, kuch kaam do 💼",
+    "Kaam choro kaam karo 😡",
+    "Hello hello, mujhe bhool gaye kya? 🤔"
+]
 
-app = Client(
-    "AutoCaptionBot",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    bot_token=BOT_TOKEN
+# Overwork thresholds
+OVERWORK_WINDOW = 60           # seconds
+OVERWORK_THRESHOLD = 8         # messages per chat per window to trigger a quip
+OVERWORK_COOLDOWN = 120        # seconds between quips per chat
+
+# Idle nudges
+IDLE_CHECK_EVERY = 300         # seconds
+IDLE_THRESHOLD = 900           # if no activity for this long, may nudge
+IDLE_CHANCE = 0.35             # 35% chance to send when threshold met
+
+# ================================
+# Logging
+# ================================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
 )
+log = logging.getLogger("PrivateFunnyCaptionBot")
 
-# ------------------ Regex helpers (precompiled) ------------------
+# ================================
+# Storage (access + activity)
+# ================================
+access_db = {
+    "users": [],   # user_ids that logged in via PM
+    "chats": []    # chat_ids (groups/channels) logged in via /login inside them
+}
+users_logged: set[int] = set()
+chats_logged: set[int] = set()
 
-# Remove trailing multi-extensions: .mkv.mp4 etc.
+# recent activity tracking per chat for overwork & idle
+recent_msgs: dict[int, deque] = defaultdict(lambda: deque(maxlen=500))  # timestamps
+last_quip_at: dict[int, datetime] = {}       # last time we sent an overwork quip
+last_activity: dict[int, datetime] = {}      # last activity in a chat
+
+# ================================
+# App
+# ================================
+app = Client("AutoCaptionBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+
+# ================================
+# Helpers: Access DB
+# ================================
+def load_access_db() -> None:
+    global access_db, users_logged, chats_logged
+    if os.path.exists(ACCESS_DB_FILE):
+        try:
+            with open(ACCESS_DB_FILE, "r", encoding="utf-8") as f:
+                access_db = json.load(f)
+            users_logged = set(access_db.get("users", []))
+            chats_logged = set(access_db.get("chats", []))
+            log.info(f"Access DB loaded: {len(users_logged)} users, {len(chats_logged)} chats.")
+        except Exception:
+            log.exception("Failed to load access DB; starting fresh.")
+            access_db = {"users": [], "chats": []}
+            users_logged, chats_logged = set(), set()
+    else:
+        access_db = {"users": [], "chats": []}
+        users_logged, chats_logged = set(), set()
+
+def save_access_db() -> None:
+    try:
+        access_db["users"] = sorted(users_logged)
+        access_db["chats"] = sorted(chats_logged)
+        with open(ACCESS_DB_FILE, "w", encoding="utf-8") as f:
+            json.dump(access_db, f, ensure_ascii=False, indent=2)
+    except Exception:
+        log.exception("Failed to save access DB.")
+
+def normalize_code(text: str) -> str:
+    # Lowercase, collapse multiple spaces
+    return re.sub(r"\s+", " ", text.strip().lower())
+
+def has_access(message: Message) -> bool:
+    if message.chat.type in ("group", "supergroup", "channel"):
+        return message.chat.id in chats_logged
+    # private
+    uid = message.from_user.id if message.from_user else None
+    return bool(uid) and uid in users_logged
+
+def mark_activity(chat_id: int) -> None:
+    now = datetime.utcnow()
+    last_activity[chat_id] = now
+    dq = recent_msgs[chat_id]
+    dq.append(now.timestamp())
+
+def maybe_send_overwork_quip(chat_id: int) -> Optional[str]:
+    # Count messages in window
+    now_ts = datetime.utcnow().timestamp()
+    dq = recent_msgs[chat_id]
+    # Drop old timestamps
+    while dq and now_ts - dq[0] > OVERWORK_WINDOW:
+        dq.popleft()
+    if len(dq) >= OVERWORK_THRESHOLD:
+        last = last_quip_at.get(chat_id)
+        if not last or (datetime.utcnow() - last).total_seconds() >= OVERWORK_COOLDOWN:
+            last_quip_at[chat_id] = datetime.utcnow()
+            return random.choice(OVERWORK_LINES)
+    return None
+
+async def idle_nudger():
+    await app.wait_until_ready()
+    while True:
+        await asyncio.sleep(IDLE_CHECK_EVERY)
+        now = datetime.utcnow()
+        for chat_id in list(chats_logged):
+            last = last_activity.get(chat_id)
+            if not last:
+                continue
+            if (now - last).total_seconds() >= IDLE_THRESHOLD:
+                if random.random() < IDLE_CHANCE:
+                    try:
+                        await app.send_message(chat_id, random.choice(IDLE_LINES))
+                        # avoid spamming: move activity forward a bit
+                        last_activity[chat_id] = now - timedelta(seconds=IDLE_THRESHOLD // 2)
+                    except Exception:
+                        # ignore send failures (e.g., removed perms)
+                        pass
+
+# ================================
+# Filename Parser (Ultra Robust)
+# ================================
 RE_MULTI_EXT = re.compile(
-    r"\.(?:mkv|mp4|avi|mov|flv|webm|wmv|m4v|ts|mpg|mpeg)"
-    r"(?:\.(?:mkv|mp4|avi|mov|flv|webm|wmv|m4v|ts|mpg|mpeg))*$",
+    r"(?:\.(?:mkv|mp4|avi|mov|flv|webm|wmv|m4v|ts|mpg|mpeg|m2ts|3gp|rmvb))"
+    r"(?:\.(?:mkv|mp4|avi|mov|flv|webm|wmv|m4v|ts|mpg|mpeg|m2ts|3gp|rmvb))*$",
+    re.IGNORECASE
+)
+RE_LEADING_BRACKETS = re.compile(r"^\s*(?:\[[^\]]*\]|\([^\)]*\)|\{[^\}]*\})\s*")
+RE_BRACKETED_BLOCK = re.compile(r"(\[[^\]]*\]|\([^\)]*\)|\{[^\}]*\})")
+RE_MULTI_SEP = re.compile(r"[_\.\-]+")
+RE_MULTI_SPACE = re.compile(r"\s+")
+
+RE_SXXEYY   = re.compile(r"\bS(\d{1,2})\s*[._\-\s]*E(\d{1,3})\b", re.IGNORECASE)
+RE_MINUS_E  = re.compile(r"(?:^|[\s\-_\.])[Ee](\d{1,4})(?:$|[\s\-_\.])")   # "- E226" etc.
+RE_SEASON_EP= re.compile(r"\bSeason\s*(\d{1,2})\s*(?:Episode|Ep)?\s*(\d{1,3})\b", re.IGNORECASE)
+RE_EPISODE  = re.compile(r"\bEpisode\s*[:\.\-\s_]*?(\d{1,3})\b", re.IGNORECASE)
+RE_EP       = re.compile(r"\bEp\s*[:\.\-\s_]*?(\d{1,3})\b", re.IGNORECASE)
+RE_E        = re.compile(r"\bE\s*[:\.\-\s_]*?(\d{1,3})\b", re.IGNORECASE)
+RE_PARENS   = re.compile(r"\(\s*(\d{1,4})\s*\)")
+
+RE_QUALITY  = re.compile(r"\b(2160|1440|1080|720|540|480|360|240)\s*[pP]?\b")
+
+TRAILING_JUNK = re.compile(
+    r"(?:\b(?:dub|dubbed|hindi|eng(?:lish)?|dual(?:[\s\-_]audio)?|multi(?:[\s\-_]audio)?|fhd|sd|hd|bluray|blu[-\s]?ray|b[dr]rip|webrip|hdrip|hevc|x265|x264|10bit|8bit|esub|e-sub|subs?|subtitle|raw|dd\s*\d\.\d|aac|mp3|sample|part\d*|v\d+)\b[\s\-\:_]*)+$",
     re.IGNORECASE
 )
 
-# Remove only leading bracketed groups like [@Channel] (repeatedly)
-RE_LEADING_BRACKETS = re.compile(r"^\s*(?:\[[^\]]*\]|\([^\)]*\)|\{[^\}]*\})\s*")
+def _remove_trailing_ext(s: str) -> str:
+    return RE_MULTI_EXT.sub("", s).strip()
 
-# For title cleanup (remove whole bracketed chunks anywhere, only for final title polish)
-RE_STRIP_BRACKETED_BLOCKS = re.compile(r"(\[.*?\]|\(.*?\)|\{.*?\})")
-
-def _remove_leading_bracket_groups(s: str) -> str:
-    # repeatedly remove bracketed groups only at the very start
+def _remove_leading_groups(s: str) -> str:
+    # repeatedly remove only at start
     while True:
         m = RE_LEADING_BRACKETS.match(s)
         if not m:
             break
         s = s[m.end():]
-    return s
-
-def _strip_multi_extensions(name: str) -> str:
-    return RE_MULTI_EXT.sub("", name)
-
-def _strip_bracket_chars_keep_content(s: str) -> str:
-    # turn "[480p]" -> " 480p ", "(Muse Dub)" -> " Muse Dub "
-    return re.sub(r"[\[\]\(\)\{\}]", " ", s)
-
-def _normalize_separators(s: str) -> str:
-    # normalize separators -> spaces and collapse
-    s = s.replace("_", " ").replace(".", " ").replace("-", " ")
-    s = re.sub(r"\s+", " ", s)
     return s.strip()
 
-# ---- Season/Episode patterns (searched on normalized + bracket-chars-stripped string) ----
-RE_SxxEyy     = re.compile(r"\bS(\d{1,2})\s*[.\- ]?\s*E(\d{1,3})\b", re.IGNORECASE)
-RE_SEASON_EP  = re.compile(r"\bSeason\s*(\d{1,2})\s*(?:Episode|Ep)?\s*(\d{1,3})\b", re.IGNORECASE)
-RE_EPISODE    = re.compile(r"\bEpisode\s*[-_. ]*(\d{1,3})\b", re.IGNORECASE)
-RE_EP         = re.compile(r"\bEp\s*[-_. ]*(\d{1,3})\b", re.IGNORECASE)
-RE_E          = re.compile(r"\bE\s*[-_. ]*(\d{1,3})\b", re.IGNORECASE)
+def _normalize_detect(s: str) -> str:
+    # keep contents, remove bracket chars, unify separators
+    s2 = re.sub(r"[\[\]\(\)\{\}]", " ", s)
+    s2 = RE_MULTI_SEP.sub(" ", s2)
+    s2 = RE_MULTI_SPACE.sub(" ", s2)
+    return s2.strip()
 
-# (very cautious fallback; we only use it if SE not found, but we already require SE to exist)
-RE_TRAIL_NUM  = re.compile(r"(?:^|[\s])(\d{1,3})(?:\s*(?:v\d+|final|end))?\s*$", re.IGNORECASE)
+def _normalize_title(s: str) -> str:
+    s2 = RE_BRACKETED_BLOCK.sub(" ", s)
+    s2 = RE_MULTI_SEP.sub(" ", s2)
+    s2 = RE_MULTI_SPACE.sub(" ", s2)
+    return s2.strip()
 
-# ---- Quality patterns (searched on normalized + bracket-chars-stripped string) ----
-RE_QUALITY_P    = re.compile(r"(?:^|[\s])(2160|1440|1080|720|540|480|360|240)\s*[pP](?:$|[\s])")
-RE_QUALITY_BARE = re.compile(r"(?:^|[\s])(2160|1440|1080|720|540|480|360|240)(?:$|[\s])")
+def _strip_trailing_junk(s: str) -> str:
+    prev = None
+    out = s.strip()
+    while prev != out:
+        prev = out
+        out = TRAILING_JUNK.sub("", out).strip()
+    return out
 
-def _find_season_episode(work: str):
-    # Highest confidence first
-    for rx in (RE_SxxEyy, RE_SEASON_EP):
-        m = rx.search(work)
-        if m:
-            s = f"S{int(m.group(1)):02d}"
-            e = f"{int(m.group(2)):02d}"
-            return s, e, m.start(), m.end()
-    for rx in (RE_EPISODE, RE_EP, RE_E):
-        m = rx.search(work)
-        if m:
-            s = "S01"
-            e = f"{int(m.group(1)):02d}"
-            return s, e, m.start(), m.end()
-    # optional trailing-number fallback (not used unless absolutely needed)
-    m = RE_TRAIL_NUM.search(work)
-    if m:
-        s = "S01"
-        e = f"{int(m.group(1)):02d}"
-        return s, e, m.start(1), m.end(1)
-    return None
-
-def _find_quality(work: str):
-    m = RE_QUALITY_P.search(work)
-    if m:
-        q = int(m.group(1))
-        return q, m.start(1), m.end(1)
-    m2 = RE_QUALITY_BARE.search(work)
-    if m2:
-        q = int(m2.group(1))
-        return q, m2.start(1), m2.end(1)
-    return None
-
-def parse_filename(filename: str):
-    """
-    Ultra-robust parser:
-      1) Remove trailing multi-extensions.
-      2) Remove leading bracketed groups (e.g., [@Group]).
-      3) Strip ONLY bracket characters (keep inner content) and normalize separators to spaces.
-      4) Extract Season/Episode, then Quality (accepts [480p], 360P SD, 1080p, etc.).
-      5) Title is text BEFORE the earliest SE/Quality token in the 'work' string.
-      6) Normalize quality: lowercase 'p'; 360p -> 480p.
-    Returns (anime_name, season, episode, quality) or None if not confident.
-    """
+def parse_filename(filename: str) -> Optional[Tuple[str, str, str, str]]:
     if not filename:
         return None
 
-    # base
-    base = _strip_multi_extensions(filename)
-    base = _remove_leading_bracket_groups(base)  # drop [@Channel] etc. ONLY at start
+    # base cleanup
+    base = _remove_trailing_ext(filename)
+    base = _remove_leading_groups(base)
 
-    # work string for detection: keep inner content of brackets, unify separators
-    work = _normalize_separators(_strip_bracket_chars_keep_content(base))
+    work = _normalize_detect(base)
+    title_pool = _normalize_title(base)
 
-    # Find Season/Episode
-    se = _find_season_episode(work)
-    if not se:
+    # ---- Season/Episode
+    season, episode = None, None
+    cut_pos_candidates = []
+
+    m = RE_SXXEYY.search(work)
+    if m:
+        season = f"S{int(m.group(1)):02d}"
+        episode = f"{int(m.group(2)):02d}"
+        cut_pos_candidates.append(m.start())
+    else:
+        m2 = RE_SEASON_EP.search(work)
+        if m2:
+            season = f"S{int(m2.group(1)):02d}"
+            episode = f"{int(m2.group(2)):02d}"
+            cut_pos_candidates.append(m2.start())
+        else:
+            # Accept "- E226" variant
+            mE = RE_MINUS_E.search(work)
+            if mE:
+                season = "S01"
+                episode = f"{int(mE.group(1)):02d}"
+                cut_pos_candidates.append(mE.start())
+            else:
+                for rx in (RE_EPISODE, RE_EP, RE_E):
+                    mm = rx.search(work)
+                    if mm:
+                        season = "S01"
+                        episode = f"{int(mm.group(1)):02d}"
+                        cut_pos_candidates.append(mm.start())
+                        break
+                else:
+                    m3 = RE_PARENS.search(work)  # fallback (227)
+                    if m3:
+                        season = "S01"
+                        episode = f"{int(m3.group(1)):02d}"
+                        cut_pos_candidates.append(m3.start())
+
+    if not episode:
         return None
-    season, episode, se_start, _ = se
 
-    # Find Quality
-    q = _find_quality(work)
-    if not q:
+    # ---- Quality
+    qm = RE_QUALITY.search(work)
+    if not qm:
         return None
-    q_val, q_start, _ = q
-
-    # Normalize quality string
+    q_val = int(qm.group(1))
     quality = "480p" if q_val == 360 else f"{q_val}p"
+    cut_pos_candidates.append(qm.start())
 
-    # Choose earliest token index to cut title
-    cut_idx = min(se_start if se_start >= 0 else len(work),
-                  q_start if q_start >= 0 else len(work))
+    # ---- Build anime title from title_pool up to earliest token
+    cut_idx = min(cut_pos_candidates) if cut_pos_candidates else len(title_pool)
+    raw_title = title_pool[:cut_idx].strip()
 
-    raw_title = work[:cut_idx].strip()
+    # polish
+    raw_title = _strip_trailing_junk(raw_title)
+    raw_title = re.sub(r"^@\S+\s*", "", raw_title).strip()
+    raw_title = raw_title.strip(" -_:|,")
+    raw_title = RE_MULTI_SPACE.sub(" ", raw_title).strip()
 
-    # Final title polish: remove any bracketed chunks that slipped, tidy separators
-    # (work has no bracket chars, but we keep this for safety if upstream changes)
-    title_clean = RE_STRIP_BRACKETED_BLOCKS.sub(" ", raw_title)
-    title_clean = _normalize_separators(title_clean)
-
-    # Drop stray leading handles like @Something (rare after step 2)
-    title_clean = re.sub(r"^@\S+\s*", "", title_clean).strip()
-
-    if not title_clean:
+    if not raw_title:
         return None
 
-    anime_name_safe = escape(title_clean)
-    return anime_name_safe, season, episode, quality
+    anime_name = escape(raw_title)
+    return anime_name, season, episode, quality
 
-# ------------------ Commands ------------------
+# ================================
+# Access Guard Decorator
+# ================================
+def guard_access(handler):
+    async def wrapper(client: Client, message: Message):
+        chat = message.chat
+        uid = message.from_user.id if message.from_user else None
+        allowed = has_access(message)
+        if not allowed:
+            # Minimal, non-leaky response
+            if chat.type in ("group", "supergroup", "channel"):
+                await message.reply("🔒 Private Bot: Pehle login karo.\n`/login Mai Kaam chor hu`", quote=True)
+            else:
+                await message.reply("🔒 Private Bot: Pehle login karo.\n`/login Mai Kaam chor hu`", quote=True)
+            return
+        # mark activity & maybe quip
+        mark_activity(chat.id)
+        out = await handler(client, message)
+        # overwork check (per chat)
+        quip = maybe_send_overwork_quip(chat.id)
+        if quip:
+            try:
+                await app.send_message(chat.id, quip)
+            except Exception:
+                pass
+        return out
+    return wrapper
 
-@app.on_message(filters.command("start") & filters.private)
-async def start_cmd(_, message: Message):
-    await message.reply_text(
-        "🤖 <b>Auto Caption Bot</b>\n\n"
-        "I automatically add captions to anime videos in channels.\n\n"
-        "Add me to your channel as admin with:\n"
-        "- Post Messages permission\n"
-        "- Delete Messages permission (optional)\n\n"
-        "Use /help for commands",
+# ================================
+# Commands
+# ================================
+@app.on_message(filters.command("start") & ~filters.forwarded)
+async def start_cmd(_, m: Message):
+    await m.reply_text(
+        "👋 <b>Private Auto-Caption Bot</b>\n\n"
+        "Use <code>/login Mai Kaam chor hu</code> to unlock.\n"
+        "Add me to your <i>group/channel</i> and run the same command there for one-time access.\n\n"
+        "After that, just post videos/documents — I’ll detect Anime Name, Season, Episode & Quality.",
         parse_mode=ParseMode.HTML
     )
 
-@app.on_message(filters.command("help") & filters.private)
-async def help_cmd(_, message: Message):
-    help_text = """<b>Available Commands:</b>
+@app.on_message(filters.command("help") & ~filters.forwarded)
+async def help_cmd(_, m: Message):
+    await m.reply_text(
+        "<b>Help</b>\n"
+        "• <code>/login Mai Kaam chor hu</code> — unlock access (PM/group/channel)\n"
+        "• Post or forward media (video/document) with filename — I’ll caption it.\n\n"
+        "Quality rules: 360p → 480p, others unchanged; <i>p</i> is lowercase.\n"
+        "Examples I handle:\n"
+        "• [@Group]_Anime_Name_S01E07_[480p].mkv.mp4\n"
+        "• Naruto Shippuden - E226 [1080p BD x265 10bit Multi Audio].mkv\n"
+        "• I Was Reincarnated as the 7th Prince S01E08 480p BluRay.mkv",
+        parse_mode=ParseMode.HTML
+    )
 
-<b>Channel Commands:</b>
-/setcaption - Set custom caption template
-/showcaption - Show current caption
+@app.on_message(filters.command("login") & ~filters.forwarded)
+async def login_cmd(_, m: Message):
+    # Extract code after /login (handle "/login Mai Kaam Chor Hu")
+    text = m.text or ""
+    parts = text.split(None, 1)
+    code = normalize_code(parts[1]) if len(parts) > 1 else ""
+    if code != SECRET_CODE_CANONICAL:
+        await m.reply_text("❌ Wrong code! Sahi code bolo: <code>Mai Kaam chor hu</code>", parse_mode=ParseMode.HTML)
+        return
 
-<b>Supported Filename Examples:</b>
-- [@Group] Anime Title S01E12 [1080p] HEVC.mkv
-- Anime Title Season 1 Episode 07 (720p).mp4
-- Anime Title Ep 05 1080P x265.mkv
-- Death Note S01E01 [@CrunchyRollChannel]_360P SD.mp4
-- Fairy Tail S04E05 [@CrunchyRollChannel]_360P SD.mp4
-- Dekin_no_Mogura_The_Earthbound_Mole_S01E07_[480p].mkv.mp4"""
-    await message.reply_text(help_text, parse_mode=ParseMode.HTML)
-
-# ------------------ Channel Handler ------------------
-
-@app.on_message(filters.channel & (filters.video | filters.document))
-async def handle_media(_, message: Message):
-    try:
-        filename = ""
-        if message.video:
-            filename = message.video.file_name or ""
-        elif message.document:
-            filename = message.document.file_name or ""
-        if not filename:
+    if m.chat.type in ("group", "supergroup", "channel"):
+        chats_logged.add(m.chat.id)
+        save_access_db()
+        await m.reply_text("✅ Login successful for this chat! Ab bot kaam karega.")
+    else:
+        if not m.from_user:
+            await m.reply_text("❌ Can't verify user.")
             return
+        users_logged.add(m.from_user.id)
+        save_access_db()
+        await m.reply_text("✅ Login successful! Ab bot kaam karega.")
 
-        logger.info(f"Processing file: {filename}")
+@app.on_message(filters.command("status") & ~filters.forwarded)
+@guard_access
+async def status_cmd(_, m: Message):
+    await m.reply_text("✅ Access active. Main taiyaar hu! ⚙️")
 
-        parsed = parse_filename(filename)
-        if not parsed:
-            logger.warning(f"Failed to parse filename: {filename}")
-            try:
-                await message.reply_text(
-                    "❌ Caption parse failed.\n"
-                    "Make sure filename includes: Season/Episode (e.g. S01E07 or Ep 07) and Quality (e.g. 480p/720p/1080p)."
-                )
-            except:
-                pass
-            return
+# ================================
+# Media Handlers (Channel/Groups/PM)
+# ================================
+@app.on_message((filters.video | filters.document) & ~filters.forwarded)
+@guard_access
+async def media_handler(_, m: Message):
+    filename = ""
+    if m.video and m.video.file_name:
+        filename = m.video.file_name
+    elif m.document and m.document.file_name:
+        filename = m.document.file_name
 
-        anime_name, season, episode, quality = parsed
+    if not filename:
+        return
 
-        caption = channel_captions.get(message.chat.id, DEFAULT_CAPTION)
-        formatted_caption = caption.format(
-            AnimeName=anime_name,
-            Sn=season,
-            Ep=episode,
-            Quality=quality
-        )
+    parsed = parse_filename(filename)
+    if not parsed:
+        # stay quiet about structure specifics; just minimal info
+        await m.reply_text("❌ Caption parse failed. Filename me Season/Episode & Quality hona chahiye.")
+        return
 
-        if message.video:
-            await message.reply_video(
-                message.video.file_id,
-                caption=formatted_caption,
-                parse_mode=ParseMode.HTML
-            )
-        else:
-            await message.reply_document(
-                message.document.file_id,
-                caption=formatted_caption,
-                parse_mode=ParseMode.HTML
-            )
+    anime_name, season, episode, quality = parsed
+    caption = DEFAULT_CAPTION.format(
+        AnimeName=anime_name,
+        Sn=season,
+        Ep=episode,
+        Quality=quality
+    )
 
-        # optional delete original
-        try:
-            await message.delete()
-        except Exception as e:
-            logger.warning(f"Couldn't delete original: {e}")
-
-        logger.info(f"Processed {filename} successfully")
-
-    except Exception as e:
-        logger.exception("Error processing media")
-        try:
-            await message.reply_text(f"❌ Error processing file: {str(e)[:200]}")
-        except:
-            pass
-
-# ------------------ Startup ------------------
-
-def load_anime_names():
-    global anime_names
     try:
-        if os.path.exists(DATA_FILE):
-            with open(DATA_FILE, "r", encoding="utf-8") as f:
-                anime_names = json.load(f)
-                logger.info(f"Loaded {len(anime_names)} anime names")
+        if m.video:
+            await m.reply_video(m.video.file_id, caption=caption, parse_mode=ParseMode.HTML)
         else:
-            anime_names = []
-    except Exception as e:
-        logger.error(f"Error loading anime names: {e}")
-        anime_names = []
+            await m.reply_document(m.document.file_id, caption=caption, parse_mode=ParseMode.HTML)
+    except Exception:
+        log.exception("Failed to send captioned media.")
+
+    # Optional: try deleting the original to avoid duplicates (won't error if missing perms)
+    try:
+        await m.delete()
+    except Exception:
+        pass
+
+# ================================
+# Text Handler (for testing via PM/Group)
+# ================================
+@app.on_message(filters.text & ~filters.command(["start", "help", "login", "status"]) & ~filters.forwarded)
+@guard_access
+async def text_filename_test(_, m: Message):
+    text = (m.text or "").strip()
+    if not text:
+        return
+    parsed = parse_filename(text)
+    if not parsed:
+        await m.reply_text("❌ Parse failed. Please include Season/Episode & Quality in filename.")
+        return
+    anime_name, season, episode, quality = parsed
+    await m.reply_text(
+        f"🎬 <b>{anime_name}</b>\n"
+        f"📺 <code>{season}</code> • <b>Ep {int(episode):02d}</b>\n"
+        f"🎥 <code>{quality}</code>",
+        parse_mode=ParseMode.HTML
+    )
+
+# ================================
+# Startup
+# ================================
+@app.on_raw_update()
+async def _track_activity(_, __):
+    # This dummy listener ensures the client is "ready" for idle_nudger
+    return
+
+async def main():
+    load_access_db()
+    await app.start()
+    # background idle nudger
+    asyncio.get_event_loop().create_task(idle_nudger())
+    log.info("✅ Bot started. Waiting for files...")
+    await app.idle()
 
 if __name__ == "__main__":
-    load_anime_names()
-    logger.info("Starting bot...")
-    app.run()
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        pass
